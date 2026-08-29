@@ -52,6 +52,11 @@ pip_upgrade.log
 media/
 video-urls.txt
 
+# Project docs not intended for version control
+AGENTS.md
+PLAN.md
+PROGRESS.md
+
 # PyInstaller
 *.manifest
 *.spec
