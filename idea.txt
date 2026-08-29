@@ -1,0 +1,13 @@
+i want to build an app that is similar to the funny mods i find in the steam workshop of many games that include 1/1000 of a skeleton running across the screen every second or 1/1000 to get jumpscared every second.
+
+
+my main goal is to have an app that is ran in the background on windows and only appears in the hidden icon to configure it. the app will track time every second and randomly test the chance that the user gives and delay or tick to roll the chance in. and if this happens succesfully i want for a transparent video or image to play with possibly a sound. these video/images can be stored in a separate folder for the user to customize.
+
+
+
+the main focus points i want about the project is that when something appears on screen it shouldnt appear as a window/default app window but as a pop up with no new window open and without an icon at the bottom.
+
+
+
+what would be the best tools/languages/libraries to use for such a project 
+
