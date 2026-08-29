@@ -82,7 +82,7 @@ class OverlayWindow(QWidget):
         self._fade.finished.connect(self._fade_finished)
 
         self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -96,6 +96,12 @@ class OverlayWindow(QWidget):
         # Re-assert topmost after geometry is set (spec: re-assert on show).
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.raise_()
+        self.setCursor(Qt.BlankCursor)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Ensure mouse transparency is retained after show (some platforms may reset)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     # -- public -----------------------------------------------------------
 
@@ -367,11 +373,19 @@ class OverlayWindow(QWidget):
     def _advance_gif_frame(self) -> None:
         if not self._gif_frames or not hasattr(self, "_gif_durations"):
             return
-        self._gif_frame_index = (self._gif_frame_index + 1) % len(self._gif_frames)
+        self._gif_frame_index += 1
+
+        if self._gif_frame_index >= len(self._gif_frames):
+            self._gif_frame_index = len(self._gif_frames) - 1
+            self._current = self._gif_frames[self._gif_frame_index]
+            self.update()
+            if self._gif_timer is not None:
+                self._gif_timer.stop()
+                self._gif_timer.deleteLater()
+                self._gif_timer = None
+            return
         self._current = self._gif_frames[self._gif_frame_index]
         self.update()
-
-        # Re-arm the single-shot timer for the next frame's duration
         if self._gif_timer is not None:
             next_delay = self._gif_durations[self._gif_frame_index]
             self._gif_timer.start(next_delay)
