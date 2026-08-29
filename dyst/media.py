@@ -199,6 +199,26 @@ def _validate_settings(path: str, raw: dict) -> dict:
                 log.warning("media: %s: volume must be 0..1", path)
         except (TypeError, ValueError):
             log.warning("media: %s: invalid volume %r", path, volume)
+    image_display = raw.get("image_display_seconds")
+    if image_display is not None:
+        try:
+            d = float(image_display)
+            if d > 0:
+                out["image_display_seconds"] = d
+            else:
+                log.warning("media: %s: image_display_seconds must be > 0", path)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid image_display_seconds %r", path, image_display)
+    fade = raw.get("fade_seconds")
+    if fade is not None:
+        try:
+            f = float(fade)
+            if f >= 0:
+                out["fade_seconds"] = f
+            else:
+                log.warning("media: %s: fade_seconds must be >= 0", path)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid fade_seconds %r", path, fade)
     return out
 
 

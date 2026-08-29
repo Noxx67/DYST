@@ -11,6 +11,7 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import random
@@ -18,6 +19,7 @@ import signal
 import sys
 
 from dyst import __version__, config as cfg, media
+from dyst.media import _validate_settings
 
 log = logging.getLogger("dyst.main")
 
@@ -62,13 +64,25 @@ def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None
         kind = item.kind
     settings = item.settings or {}
     # Per-file overrides from the same-named .json/.txt sidecar (AGENTS.md).
+    # NOTE: image_display_seconds / fade_seconds overrides only apply to images;
+    # videos use the global config values (per-file values are ignored).
     mode = settings.get("mode", "fit")
-    image_seconds = settings.get("duration", config["image_display_seconds"])
     volume = config["audio_volume"] * float(settings.get("volume", 1.0))
+    if item.kind == "image":
+        image_seconds = settings.get("image_display_seconds",
+                                     settings.get("duration",
+                                                  config["image_display_seconds"]))
+        fade_seconds = settings.get("fade_seconds", config["fade_seconds"])
+    else:
+        image_seconds = config["image_display_seconds"]
+        fade_seconds = config["fade_seconds"]
+    print(f"[CONFIG] Global image_display_seconds={cfg.DEFAULTS['image_display_seconds']}, fade_seconds={cfg.DEFAULTS['fade_seconds']}")
+    print(f"[CONFIG] Per-file image_display_seconds={settings.get('image_display_seconds')}, fade_seconds={settings.get('fade_seconds')}")
+    print(f"[CONFIG] Using image_seconds={image_seconds}, fade_seconds={fade_seconds} for {item.kind}")
     win = OverlayWindow()
     if not win.load(item.path, kind,
                     image_seconds=image_seconds,
-                    fade_seconds=config["fade_seconds"],
+                    fade_seconds=fade_seconds,
                     audio_volume=volume,
                     mode=mode,
                     sidecar_audio=item.sidecar_audio):
@@ -87,14 +101,11 @@ def _run_daemon(app, config: dict) -> None:
     overlays = []
 
     def spawner(item: media.MediaItem) -> bool:
-        # enforce max_on_screen limit (0 = unlimited)
-        if config.get("max_on_screen", 0) > 0:
-            video_now = sum(
-                1 for w in overlays if w._kind in ("video", "video-qt", "video-av1")
-            )
-            if video_now >= config["max_on_screen"]:
-                log.debug("max_on_screen (%s) reached – skipping spawn", config["max_on_screen"])
-                return False
+        # enforce max_concurrent limit (0 = unlimited)
+        cap = int(config.get("max_concurrent", 0) or 0)
+        if cap > 0 and len(overlays) >= cap:
+            log.debug("max_concurrent (%s) reached – skipping spawn", cap)
+            return False
         win = _spawn_overlay(config, item)
         if win is None:
             return False
@@ -156,7 +167,40 @@ def _run_qt(config: dict, args) -> int:
         if kind is None:
             log.error("unsupported media type: %s (use image/video extensions)", path)
             return 1
-        win = _spawn_overlay(config, media.MediaItem(path, kind))
+        item = media.MediaItem(path, kind)
+        # Load per-file sidecar settings (same-named .json/.txt)
+        base, _ = os.path.splitext(path)
+        for ext in (".json", ".txt"):
+            spath = base + ext
+            if not os.path.isfile(spath):
+                continue
+            try:
+                if ext == ".json":
+                    with open(spath, "r", encoding="utf-8") as fh:
+                        raw = json.load(fh)
+                    if not isinstance(raw, dict):
+                        raise ValueError("root must be an object")
+                else:
+                    raw = _parse_txt_settings(spath)
+            except Exception as exc:
+                log.warning("media: invalid settings file %s (%s) — ignored", spath, exc)
+                continue
+            # Merge settings into item.settings (JSON wins over any existing)
+            if not item.settings:
+                item.settings = _validate_settings(spath, raw)
+            else:
+                # Merge: keep existing mode/volume, add new display settings
+                existing = item.settings
+                for k in ("image_display_seconds", "fade_seconds", "mode", "volume"):
+                    if k in raw and raw[k] is not None:
+                        existing[k] = raw[k]
+            break  # Found settings, stop looking
+        # Print configuration values
+        settings = item.settings or {}
+        print(f"[CONFIG] Global image_display_seconds={cfg.DEFAULTS['image_display_seconds']}, fade_seconds={cfg.DEFAULTS['fade_seconds']}")
+        print(f"[CONFIG] Per-file image_display_seconds={settings.get('image_display_seconds')}, fade_seconds={settings.get('fade_seconds')}")
+        print(f"[CONFIG] Using image_seconds={settings.get('image_display_seconds', cfg.DEFAULTS['image_display_seconds'])}, fade_seconds={settings.get('fade_seconds', cfg.DEFAULTS['fade_seconds'])} for {item.kind}")
+        win = _spawn_overlay(config, item)
         if win is None:
             return 1
         win.finished.connect(app.quit)

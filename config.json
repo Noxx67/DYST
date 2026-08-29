@@ -1,10 +1,10 @@
 {"tick_seconds": 1.0, 
-"odds": 10, 
+"odds": 2, 
 "max_concurrent": 1, 
 "reroll_in_same_tick": true, 
 "media_folder": "media", 
-"image_display_seconds": 1.0, 
-"fade_seconds": 0, 
+"image_display_seconds": 2, 
+"fade_seconds": 2, 
 "monitor": "primary", 
 "audio_volume": 0.8, 
 "chroma_key": 

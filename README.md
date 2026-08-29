@@ -121,7 +121,13 @@ volume=0.8
 |---|---|---|
 | `mode` | `fit` (default) · `cover` · `stretch` | `fit` = keep aspect, letterbox, centered · `cover` = fill the screen, crop the overflow (centered) · `stretch` = fill the screen, squish to fit |
 | `duration` | any number > 0 (seconds) | How long to show (images). Videos ignore it. |
+| `image_display_seconds` | any number > 0 (seconds) | Override for the global `image_display_seconds` (images only). Takes priority over `duration`. |
+| `fade_seconds` | any number >= 0 (seconds) | Override for the global `fade_seconds` — how long the fade-out lasts. Image-only; ignored by videos. |
 | `volume` | 0.0 – 1.0 | Volume for that file (multiplied with global `audio_volume`). |
+
+`duration`, `image_display_seconds`, and `fade_seconds` are **image-only** —
+when attached to a video they are silently ignored (videos play to end and use
+the global `fade_seconds` for their fade-out).
 
 Anything invalid is dropped with a logged warning — it never breaks the app.
 
@@ -153,15 +159,22 @@ When an overlay triggers (a roll succeeds, or you use `--test` / `--play`):
      **click-through** (clicks pass to whatever is underneath).
 2. Media is drawn **fitted** to the screen (aspect preserved, centered) unless
    the file's sidecar sets `mode` to `cover` or `stretch`.
-3. **Images:** shown for `image_display_seconds` (or sidecar `duration`), then
-   fade out (`fade_seconds`).
+3. **Images:** shown for `image_display_seconds` (or sidecar `duration`),
+   then fade out over `fade_seconds` (the window opacity animates 1→0 while
+   any sidecar audio keeps playing).
 4. **Videos:** played to the end via QtMultimedia (audio + modern codecs),
-   then disappear **instantly** (no fade — per user request).
-   **Images** still fade out over `fade_seconds`.
+   then fade out over `fade_seconds` (window opacity 1→0).
+
+**Audio lifetime — a single overlay:** when the visual content finishes
+(its display time for images, or end-of-media for videos) it begins to fade
+out, but **any audio keeps playing** through the fade-out and beyond.  The
+overlay window only closes — and only frees its slot for `max_concurrent` —
+once **both** the visual fade and the audio have fully finished.  So an
+image (or video) plus its audio counts as **one** occurrence, not two.
 
 **Audio:** videos play their own audio track (respecting `audio_volume` and
 any per-file `volume`). You can also add a **sidecar audio file** — same base
-name, same folder (e.g. `scare.mp4` + `scare.mp3`, `boo.png` + `boo.wav`) —
+name, same folder (e.g. `scare.mp4` + `scare.wav`, `boo.png` + `boo.wav`) —
 and it takes priority over the video's own audio. Supported: `.mp3 > .wav >
 .ogg > .flac > .m4a` (that order if several exist). Sidecar audio also gives
 images sound.
@@ -211,6 +224,12 @@ Everything is logged to **`app.log`** next to the app (and the console). Set
 `"debug": true` in `config.json` for verbose per-roll detail.
 
 ---
+
+## Recent Changes
+
+- **Fixed image closing prematurely**: Updated `_close_if_ready` in `dyst/overlay.py` to require that the visual media has finished displaying (`_visual_done`), the fade-out animation has completed (`_fade_done`), and the audio has finished (`_audio_done`) before closing the overlay. This prevents the overlay from closing early when the side‑car audio is shorter than the configured display time.
+
+- **Fixed image centering**: Changed the `mode` in `media/images/woolly-mammoth.json` from `"cover"` to `"fit"`. The `"fit"` mode preserves the aspect ratio and centers the image within the window (adding letter‑boxing if needed), ensuring the image appears in the middle.
 
 ## What's coming (see PROGRESS.md for details)
 

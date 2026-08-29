@@ -69,13 +69,17 @@ class OverlayWindow(QWidget):
         self._gif_frames: list[QImage] = []
         self._gif_frame_index = 0
         self._gif_timer: QTimer | None = None
+        self._visual_done = False   # True once the visual media has finished playing/displaying
+        self._audio_done = False   # True once all audio has finished (or there is no audio player)
+        self._fade_started = False  # True once the fade-out animation has begun
+        self._fade_done = False     # True once the fade-out animation has completed
 
         self._video_timer = QTimer(self)
         self._video_timer.setInterval(self.FRAME_MS)
         self._video_timer.timeout.connect(self._next_frame)
 
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade.finished.connect(self._finish_close)
+        self._fade.finished.connect(self._fade_finished)
 
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
@@ -86,7 +90,9 @@ class OverlayWindow(QWidget):
 
         screen = QApplication.primaryScreen()
         if screen is not None:
-            self.setGeometry(screen.geometry())
+            g = screen.geometry()
+            # Center window on screen
+            self.setGeometry(g.center().x() - g.width() // 2, g.center().y() - g.height() // 2, g.width(), g.height())
         # Re-assert topmost after geometry is set (spec: re-assert on show).
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.raise_()
@@ -113,7 +119,19 @@ class OverlayWindow(QWidget):
         self._fade_seconds = max(0.0, fade_seconds)
         self._audio_volume = max(0.0, min(1.0, audio_volume))
         self._mode = mode if mode in ("fit", "cover", "stretch") else "fit"
-        self._sidecar = sidecar_audio if (sidecar_audio and os.path.isfile(sidecar_audio)) else None
+        # Sidecar audio: explicit argument wins; else auto-detect by basename
+        if sidecar_audio and os.path.isfile(sidecar_audio):
+            self._sidecar = sidecar_audio
+        else:
+            self._sidecar = None
+            if not self._sidecar:
+                base, _ = os.path.splitext(path)
+                for ext in (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a"):
+                    candidate = base + ext
+                    if os.path.isfile(candidate):
+                        self._sidecar = candidate
+                        log.info("overlay: found sidecar audio %s for %s", candidate, path)
+                        break
 
         if kind == "image":
             # Animated GIF support via manual frame extraction.
@@ -158,6 +176,15 @@ class OverlayWindow(QWidget):
                 except Exception as exc:
                     log.warning("overlay: cannot load gif %s (%s)", path, exc)
 
+            # Static image (png, jpg, webp, etc.)
+            if self._current is None:
+                self._current = self._load_image(path)
+                if self._current is None:
+                    return False
+                if self._sidecar:
+                    self._create_audio_player(self._sidecar)
+                return True
+
 
         if kind in ("video", "video-qt", "video-av1"):
             if kind == "video-qt":
@@ -177,12 +204,13 @@ class OverlayWindow(QWidget):
                         
             if self._gif_frames:
                 # DO NOT call self._gif_timer.start() here without args; load() already started frame 0.
-                # GIFs: play through once, then close instantly (no fade).
+                # GIFs: play through once, then begin the visual fade-out while
+                # any sidecar audio keeps playing (single overlay for max_concurrent).
                 gif_duration = getattr(self, "_gif_duration_ms", len(self._gif_frames) * 50)
                 delay = max(int(self._image_seconds * 1000), gif_duration)
-                QTimer.singleShot(delay, self._finish_close)
+                QTimer.singleShot(delay, self._visual_end)
             else:
-                QTimer.singleShot(int(self._image_seconds * 1000), self._start_fade)
+                QTimer.singleShot(int(self._image_seconds * 1000), self._visual_end)
                 
         elif self._kind == "video-qt":
             if self._player is not None:
@@ -225,6 +253,7 @@ class OverlayWindow(QWidget):
         player = QMediaPlayer(self)
         player.setAudioOutput(audio_out)
         player.setSource(QUrl.fromLocalFile(path))
+        player.mediaStatusChanged.connect(self._audio_end)
         self._audio_player = player
 
     def _load_video_av1(self, path: str) -> bool:
@@ -271,18 +300,69 @@ class OverlayWindow(QWidget):
 
     def _on_qt_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._finish_close()  # video ended: end instantly (no fade)
-        elif status == QMediaPlayer.MediaStatus.LoadFailed:
-            # In Qt6 the LoadFailed member does not exist; treat as end/error
-            self._finish_close()
-        elif status in (QMediaPlayer.MediaStatus.InvalidMedia,
-                        QMediaPlayer.MediaStatus.UnknownMediaStatus):
+            # For video with its own audio there is no separate audio player,
+            # so the video's audio ended together with the video.
+            self._audio_done = (self._audio_player is None)
+            self._on_visual_finished()
+            return
+        elif getattr(QMediaPlayer.MediaStatus, "LoadFailed", None) == status:
+            # In some Qt6 builds LoadFailed is absent; treat as end/error
+            self._on_visual_finished()
+            return
+        enum = QMediaPlayer.MediaStatus
+        invalid = enum.InvalidMedia
+        unknown = getattr(enum, "UnknownMediaStatus", None)
+        if status == invalid or (unknown is not None and status == unknown):
             log.error("overlay: media error for %s (status %s)", self._path, status)
-            self._finish_close()
+            self._audio_done = (self._audio_player is None)
+            self._on_visual_finished()
+            return
         else:
-            # any other status – keep playing unless explicitly errored
+            # any other status - keep playing unless explicitly errored
             pass
 
+    def _audio_end(self, status) -> None:
+        """Callback for the sidecar / extracted audio player (mediaStatusChanged)."""
+        ended = (status == QMediaPlayer.MediaStatus.EndOfMedia or
+                 getattr(QMediaPlayer.MediaStatus, "LoadFailed", None) == status)
+        if ended:
+            self._audio_done = True
+            self._audio_player = None  # finished/errored - nothing left to wait for
+        self._close_if_ready()
+
+    def _on_visual_finished(self) -> None:
+        """Called when the visual media has finished playing/displaying
+        (image display time elapsed, GIF played through, or video EndOfMedia).
+
+        The image/GIF fades out over ``fade_seconds``.  Any separate audio
+        player (sidecar / extracted) is intentionally LEFT PLAYING - the
+        overlay only closes once *both* the visual fade and the audio have
+        finished, so an image+audio pair counts as a single occurrence for
+        max_concurrent.
+        """
+        self._visual_done = True
+        if self._audio_player is None:
+            # No separate audio to keep playing - audio is already done.
+            self._audio_done = True
+        if not self._fade_started:
+            self._start_fade()  # visual fade-out only; audio keeps playing
+        self._close_if_ready()
+
+    def _visual_end(self, gif_timer=None) -> None:
+        """Timer callback: the image/GIF display duration has elapsed."""
+        self._on_visual_finished()
+
+    def _fade_finished(self) -> None:
+        """Fade-out animation (windowOpacity 1->0) has completed."""
+        self._fade_done = True
+        self._close_if_ready()
+
+    def _close_if_ready(self) -> None:
+        """Close the overlay only when both the visual fade and the audio have
+        finished.  If the audio is still playing (or the fade is still
+        running), wait for it to finish first."""
+        if self._audio_done and self._visual_done and self._fade_done:
+            self._finish_close()
 
     def _advance_gif_frame(self) -> None:
         if not self._gif_frames or not hasattr(self, "_gif_durations"):
@@ -328,7 +408,8 @@ class OverlayWindow(QWidget):
                 while self._frame_index < target:
                     ok, frame = self._cap.read()
                     if not ok:
-                        self._finish_close()  # end of video: end instantly
+                        self._video_timer.stop()
+                        self._on_visual_finished()
                         return
                     self._frame_index += 1
                     self._current = self._frame_to_qimage(frame)
@@ -338,7 +419,8 @@ class OverlayWindow(QWidget):
             return
         ok, frame = self._cap.read()
         if not ok:
-            self._finish_close()  # end of video: end instantly (no fade)
+            self._video_timer.stop()
+            self._on_visual_finished()
             return
         self._current = self._frame_to_qimage(frame)
         self.update()
@@ -347,12 +429,15 @@ class OverlayWindow(QWidget):
         self._video_timer.stop()
         if self._player is not None:
             self._player.stop()
-        if self._audio_player is not None:
-            self._audio_player.stop()
         if self._gif_timer is not None:
             self._gif_timer.stop()
             self._gif_timer.deleteLater()
             self._gif_timer = None
+        # NOTE: the audio player is intentionally NOT stopped here - it keeps
+        # playing while the visual fades out, so the overlay stays alive (a
+        # single max_concurrent occurrence) until the audio finishes too.
+        self._fade_started = True
+        self._fade_done = False
         self._fade.setDuration(int(self._fade_seconds * 1000))
         self._fade.setStartValue(1.0)
         self._fade.setEndValue(0.0)

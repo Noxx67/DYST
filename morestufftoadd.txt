@@ -1,0 +1,7 @@
+more config as in if the image should stretch over the screen or the video. if the media should fit the screen vertically or horizontally
+if the image can appear at random positions or a set position and size (hello neighbor subscribe gif appearing in the bottom right or smth)
+additionally chroma key implementation for easier access to the green screen videos that can be directly downloaded
+
+easier configuration page and gui instead of the raw config.json 
+
+idk what else to add for now. maybe a release build when most of the things work.
