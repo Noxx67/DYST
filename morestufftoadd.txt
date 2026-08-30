@@ -4,4 +4,10 @@ additionally chroma key implementation for easier access to the green screen vid
 
 easier configuration page and gui instead of the raw config.json 
 
+kill button or something when the thing just wont stop
+
+switch builder to directly use C++ to save space cuz damn what do you mean 200mb for this piece of shit like nuitka
+
+media that appears on top should ignore cursor to allow games to keep the mouse locked - Done
+
 idk what else to add for now. maybe a release build when most of the things work.

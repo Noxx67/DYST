@@ -11,7 +11,8 @@ Overall progress tracker. Single source of truth for what has been done and test
 - **Also done:** Phase 1 core ticker (roll + burst) ✅ verified
 - **Additional fixes:** ticker config bugs (`_roll_once` missing, `max_concurrent` parser) resolved; Qt Multimedia video overlay error `LoadFailed` enum fix; video playback no longer crashes with AttributeError.
 - **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ (tray wiring pending Phase 6)
-- **Last updated:** Phase 2 completion (media scanning & pairing)
+- **Packaging:** PyInstaller build ✅ DONE & VERIFIED (Phase 7 partial — see report below)
+- **Last updated:** PyInstaller packaging (Phase 7 partial)
 
 ---
 
@@ -27,7 +28,7 @@ Overall progress tracker. Single source of truth for what has been done and test
 | 4 | Overlay window polish | ⬜ not started | monitor selection, animation (GIF/APNG) |
 | 5 | Manager & audio | ⬜ not started | global concurrency, audio/sidecar |
 | 6 | Tray + autostart | ⬜ not started | |
-| 7 | Polish, packaging, docs | ⬜ not started | |
+| 7 | Polish, packaging, docs | 🔄 in progress | packaging (PyInstaller) done & verified; tray/autostart not built yet |
 
 Legend: ⬜ not started · 🔄 in progress · ✅ done · ✔ verified
 
@@ -245,6 +246,99 @@ play fullscreen on top, fade out, and the app exit. This is the main thing to ey
 before we continue.
 
 ---
+
+## Packaging — PyInstaller build (Phase 7 partial)
+
+**Request:** user wants the project compiled as-is; the .exe must keep free access to an
+**external, user-editable `config.json` and `media/`** beside the executable.
+
+### Work done
+
+1. **Found the existing `dist/DYST/DYST.exe` broken** — crashed instantly with
+   `ImportError: cannot import name 'config' from 'dyst'`.
+2. **Root cause: `dyst/config.py` was corrupted in the working tree** (two full copies of
+   the module concatenated, 381 lines vs 199 committed). The mid-file
+   `from __future__ import annotations` caused a `SyntaxError`, killing the module compile
+   — which broke the frozen exe AND `python main.py` in dev.
+3. **Repaired `dyst/config.py`** to a single clean copy = committed version + the intended
+   (previously mangled) additions: `import sys`, `get_base_dir()` (exe dir when frozen),
+   and `load_config()` now always resolves a relative `media_folder` to an absolute path
+   relative to `get_base_dir()` (<exe>/app dir). One `save_config` (duplicate removed).
+4. **Updated `scripts/test_phase0.py`** — 3 assertions (missing-file / malformed-JSON /
+   non-object-root) now expect the default `media_folder` resolved to an absolute path,
+   matching the new intended behavior.
+5. **Rebuilt** with the venv's PyInstaller 6.22.2 using the existing `DYST.spec`
+   (onedir, windowed): `./.venv/Scripts/python.exe -m PyInstaller DYST.spec --noconfirm --clean`.
+   Output: `dist/DYST/DYST.exe` + `_internal/` (292 MB).
+
+### How external config/media works (no code change needed)
+
+- `main.py`/`dyst/config.py` `get_base_dir()` → `os.path.dirname(sys.executable)` when frozen,
+  so the exe reads `config.json` and resolves `media/` **next to the exe itself**.
+- Neither `config.json` nor `media/` is bundled into the exe — both stay fully external
+  and user-editable without touching the build.
+
+### Verified (commands + results)
+
+- Dev: `py_compile` clean on config.py; `python main.py --roll` exit 0.
+- `scripts/test_phase0.py` → **All Phase 1 checks passed** (6/6) — was red before the fix.
+- `scripts/test_phase1.py` (offscreen) → **All Phase 1 checks passed** (7/7).
+- **Staged clean copy** (`exe_test/` with DYST.exe + _internal + config.json + media):
+  - `--roll` exit 0, reads staged config, media_folder resolved to `exe_test\media`. ✓
+  - Edited staged `config.json` (odds 10 → 999, tick 2.0, debug off) → exe honored it (roll 1/999). ✓
+  - `--play` existing image, P**newly-dropped image** (user can add media anytime, no rebuild) ✓
+  - `--play` test_scare.mp4 (QtMultimedia) exit 0 ✓
+  - `--play` jumpscare .mkv (QtMultimedia) exit 0 ✓
+  - `app.log` written beside the exe ✓
+  - All playback smoke tests offscreen (`QT_QPA_PLATFORM=offscreen`).
+- No AV1 files in the current pool (all h264/mpeg4), so the `video-av1` fallback
+  (OpenCV + ffmpeg-extracted audio) was not exercised in the frozen build — it is
+  verified working in dev and requires ffmpeg on PATH (as in dev).
+
+### Notes / limitations
+
+- The user still needs to test the real fullscreen overlay on the desktop
+  (`.\dist\DYST\DYST.exe --test`); offscreen only proves load/play/exit.
+- Daemon (no-flag) mode auto-starts the chance loop when launched — don't leave it
+  running while testing.
+- `tray`, `autostart`, `chroma`, `manager` modules remain stubs (Phases 3–6).
+
+### Size optimization (user request: "make the build smaller")
+
+**292 MB → 252 MB** (−40 MB, −14%). No application code changed — only `DYST.spec`.
+
+- **Cause of bloat:** PyInstaller's Qt hook collects whole plugin directories (`imageformats`,
+  `iconengines`, `platforminputcontexts`), which dragged in unused Qt modules and their
+  dependency trees: `opengl32sw.dll` (20 MB software-OpenGL), Qt6Pdf (4.5 MB), Qt6Svg,
+  Qt6VirtualKeyboard → Qt6Quick (6.3 MB) → Qt6Qml family (6 MB), plus 124 Qt
+  translation files (~7 MB) and every image-format plugin (~2 MB).
+- **Fix (spec-only):** `DYST.spec` now filters `a.binaries`/`a.datas` after analysis,
+  dropping only the unused Qt binaries/plugins/translations (documented list in the spec).
+  Everything the app actually uses is kept: Windows/offscreen/minimal platforms,
+  `ffmpegmediaplugin` + `windowsmediaplugin`, networkinformation, styles, tls, Qt6
+  Core/Gui/Widgets/Multimedia/Network, bundled ffmpeg codec DLLs.
+- **Verified after prune** (staged clean copy `DYST.exe` + `config.json` + `media/`):
+  `--roll` exit 0; `--play` image ✓, mp4 (QtMultimedia) ✓, mkv (QtMultimedia) ✓;
+  `imageformats` not needed because overlay.py builds QImage from raw PIL bytes.
+  Size breakdown now: PySide6 74 M, cv2 112 M, numpy 27 M, PIL 11 M, python311 5.6 M.
+
+**Remaining size options (NOT done — need user confirmation):**
+
+1. **~`opencv-python` → `opencv-python-headless`~ — DONE, but saves NOTHING on Windows:**
+   swapped it in the venv + `requirements.txt` and rebuilt, but on Windows v5 the ``headless``
+   wheel is byte-identical in size (cv2.pyd 82 MB + opencv_videoio_ffmpeg500_64.dll 30 MB =
+   112 MB either way) — Windows Qt/GTK GUI backends don't exist, so there's nothing to strip.
+   Dist total stays 252 MB. Kept headless since it's the semantically-correct package for this
+   app (no cv2 GUI used) and it doesn't hurt. Rebuild + video playback smoke-tested OK.
+
+2. **UPX compression** (the REAL big lever now): not installed. `upx=True` in the spec already;
+   installing UPX (winget) would compress the 112 MB cv2 + 74 MB PySide6 + DLLs roughly 40–60%
+   (**−50 to −120 MB**, likely landing ~150–200 MB). Trade-offs: possible antivirus false
+   positives (AGENTS.md already flags the PyInstaller AV concern) and slightly slower first
+   startup. Recommended if size matters.
+
+3. **onefile**: not smaller (compressed archive ≈ same), slower startup, temp extraction
+   at launch. Not recommended.
 
 ## Environment notes
 

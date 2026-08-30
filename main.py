@@ -24,6 +24,14 @@ from dyst.media import _validate_settings
 log = logging.getLogger("dyst.main")
 
 
+def get_base_dir() -> str:
+    """Returns the directory of the .exe when compiled, or main.py when running in dev."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+
 def _setup_logging(debug: bool) -> None:
     level = logging.DEBUG if debug else logging.INFO
     handlers = [
@@ -31,7 +39,7 @@ def _setup_logging(debug: bool) -> None:
     ]
     try:
         handlers.append(logging.FileHandler(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log"),
+        os.path.join(get_base_dir(), "app.log"),
             encoding="utf-8"))
     except OSError:
         pass  # best-effort file logging
@@ -234,7 +242,9 @@ def main(argv=None) -> int:
                         help="run the chance loop (ticker) without a tray icon")
     parser.add_argument("--roll", action="store_true",
                         help="simulate one roll and print the result")
-    parser.add_argument("--config", default="config.json", help="path to config file")
+    #parser.add_argument("--config", default="config.json", help="path to config file")
+    default_config_path = os.path.join(get_base_dir(), "config.json")
+    parser.add_argument("--config", default=default_config_path, help="path to config file")
     args = parser.parse_args(argv)
 
     config = cfg.load_config(args.config)
@@ -248,6 +258,10 @@ def main(argv=None) -> int:
         print(f"roll: odds=1/{config['odds']} chance={chance:.6f} "
               f"result={'SUCCESS' if result else 'fail'}")
         return 0
+
+    # for pyinstaller to run on daemon automatically
+    if not (args.test or args.play or args.daemon or args.roll):
+        args.daemon = True
 
     if args.test or args.play or args.daemon:
         try:

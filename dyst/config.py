@@ -10,7 +10,17 @@ import copy
 import json
 import logging
 import os
+import sys
 from typing import Any, Dict
+
+
+def get_base_dir() -> str:
+    """Returns the directory of the .exe when compiled, or application root in dev."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    # Refers to the parent directory of dyst/ config module
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 log = logging.getLogger("dyst.config")
 
@@ -158,31 +168,30 @@ def load_config(path: str) -> Dict[str, Any]:
     """
     cfg = copy.deepcopy(DEFAULTS)
 
-    if not os.path.isfile(path):
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                user = json.load(fh)
+            if isinstance(user, dict):
+                for key, (validator, default) in _TOP_LEVEL_RULES.items():
+                    if key in user:
+                        if not validator(user[key]):
+                            log.warning("config: invalid value for '%s' (%r) — using default %r", key, user[key], default)
+                        else:
+                            cfg[key] = user[key]
+
+                if "chroma_key" in user:
+                    cfg["chroma_key"] = _validate_chroma_key(user["chroma_key"])
+            else:
+                log.warning("config: root of %s is not an object — using defaults", path)
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("config: failed to read %s (%s) — using defaults", path, exc)
+    else:
         log.info("config: no file at %s — using defaults", path)
-        return cfg
 
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            user = json.load(fh)
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("config: failed to read %s (%s) — using defaults", path, exc)
-        return cfg
-
-    if not isinstance(user, dict):
-        log.warning("config: root of %s is not an object — using defaults", path)
-        return cfg
-
-    for key, (validator, default) in _TOP_LEVEL_RULES.items():
-        if key not in user:
-            continue
-        if not validator(user[key]):
-            log.warning("config: invalid value for '%s' (%r) — using default %r", key, user[key], default)
-            continue
-        cfg[key] = user[key]
-
-    if "chroma_key" in user:
-        cfg["chroma_key"] = _validate_chroma_key(user["chroma_key"])
+    # Always converts relative media_folder paths regardless of how config loaded
+    if not os.path.isabs(cfg["media_folder"]):
+        cfg["media_folder"] = os.path.abspath(os.path.join(get_base_dir(), cfg["media_folder"]))
 
     return cfg
 

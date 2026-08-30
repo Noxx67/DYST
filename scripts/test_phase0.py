@@ -36,10 +36,18 @@ def _write(tmpdir: str, name: str, data) -> str:
 
 def main() -> int:
     failures = []
+    # load_config always resolves a relative media_folder to an absolute path
+    # against the app/exe dir (so config.json + media/ stay beside the exe).
+    _resolved_defaults = {
+        **cfg.DEFAULTS,
+        "media_folder": os.path.abspath(
+            os.path.join(cfg.get_base_dir(), cfg.DEFAULTS["media_folder"])
+        ),
+    }
     with tempfile.TemporaryDirectory() as tmp:
-        # 1. Missing file -> defaults
+        # 1. Missing file -> defaults (with media_folder resolved)
         c = cfg.load_config(os.path.join(tmp, "missing.json"))
-        assert c == cfg.DEFAULTS, f"missing file: expected defaults, got {c}"
+        assert c == _resolved_defaults, f"missing file: expected defaults, got {c}"
         print("PASS missing config -> defaults")
 
         # 2. Valid config -> user values win
@@ -65,13 +73,13 @@ def main() -> int:
         # 3. Malformed JSON -> defaults, no crash
         p = _write(tmp, "bad.json", "{ this is not json ")
         c = cfg.load_config(p)
-        assert c == cfg.DEFAULTS, c
+        assert c == _resolved_defaults, c
         print("PASS malformed JSON -> defaults")
 
         # 4. Root not an object -> defaults
         p = _write(tmp, "root.json", [1, 2, 3])
         c = cfg.load_config(p)
-        assert c == cfg.DEFAULTS, c
+        assert c == _resolved_defaults, c
         print("PASS non-object root -> defaults")
 
         # 5. Invalid values -> per-key default fallback
