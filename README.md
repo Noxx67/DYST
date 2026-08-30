@@ -1,6 +1,6 @@
 # DYST (did you see that? 👀)
 
-A Windows background "scare/funny mod" app — at random intervals it plays a
+A Windows background app — at random intervals it plays a
 fullscreen image or video on top of whatever you're doing, then disappears.
 No window, no taskbar icon, no focus steal; it overlays directly on the screen.
 
