@@ -17,4 +17,5 @@
 "autostart": false, 
 "debug": true, 
 "download_max_height": 720, 
-"rescan_seconds": 60}
+"rescan_seconds": 60,
+"show_console": false}

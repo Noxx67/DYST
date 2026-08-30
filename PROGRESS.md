@@ -340,6 +340,33 @@ before we continue.
 3. **onefile**: not smaller (compressed archive ≈ same), slower startup, temp extraction
    at launch. Not recommended.
 
+### `show_console` config toggle (user request: optional log terminal)
+
+**Request:** when launching `DYST.exe`, optionally show a terminal with live logs;
+controlled by a config flag — `true` = launch as terminal, `false` = hidden background.
+
+**Implementation (standard PyInstaller pattern):**
+- `DYST.spec`: `console=False` → `console=True` — the exe is now a console-subsystem
+  binary, so it CAN show a log terminal (from a console it attaches to it; double-clicked
+  it spawns one).
+- `main.py`: new `_apply_console_mode(config)` — called right after `load_config()`, before
+  `_setup_logging()`. If `show_console` is falsy AND frozen on Windows, it calls
+  `FreeConsole()` (ctypes/Kernel32) to detach the console and redirects stdout/stderr to
+  `io.StringIO()` so any later logging/print writes are harmless. Logs still go to `app.log`.
+  In dev (`python main.py`) nothing changes (stdout stays).
+- `dyst/config.py`: new `show_console` key (default `false`) in `DEFAULTS` + `_TOP_LEVEL_RULES`
+  (bool validator). `config.json` updated to include it, AGENTS.md §8 schema updated too.
+
+**Verified (staged clean exe + config + media):**
+- `show_console=true` → `--roll` prints live logs + result to console (tested).
+- `show_console=false` → `--roll` captures 0 bytes of stdout, `app.log` still written (tested).
+- Daemon (no-flag) smoke: runs, ticker ticks logged to `app.log` (offscreen).
+- Dev suites still green (Phase 0 config checks include the new key, Phase 1 offscreen 7/7).
+
+**Trade-off to be aware of:** with `console=True`, even background mode shows a brief
+console window flash at startup (before `FreeConsole()` runs — happens after config load).
+It's the shortest possible hide point without a second (console) build.
+
 ## Environment notes
 
 - **Working dir:** `C:/Users/ahmed/Downloads/Pi/`

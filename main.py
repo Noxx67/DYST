@@ -61,6 +61,31 @@ def _reconfigure_console() -> None:
                 pass
 
 
+def _apply_console_mode(config: dict) -> None:
+    """Honour the `show_console` config flag on the frozen (PyInstaller) exe.
+
+    The exe is built with `console=True` so it CAN show a live log terminal.
+    When `show_console` is False (background mode), detach from that console
+    with FreeConsole() as early as possible and neutralise stdout/stderr so
+    any later logging/print writes are harmless (logs still go to app.log).
+    """
+    if config.get("show_console", False):
+        return  # terminal mode: keep the console, logs stream to it
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return  # dev runs keep their stdout; nothing to detach
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.FreeConsole()
+    except Exception:
+        pass
+    # stdout/stderr now point at a closed console; neutralise them.
+    import io
+
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
+
+
 def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None":
     from dyst.overlay import OverlayWindow  # lazy: only Qt modes need it
 
@@ -248,6 +273,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     config = cfg.load_config(args.config)
+    _apply_console_mode(config)
     _setup_logging(config["debug"])
     log.info("%s starting (version %s)", cfg.APP_NAME, __version__)
     log.debug("loaded config: %r", config)

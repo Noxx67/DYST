@@ -57,6 +57,7 @@ DEFAULTS: Dict[str, Any] = {
     "download_max_height": 1080,  # max video height (px) for the downloader
     "rescan_seconds": 0,          # daemon: re-scan media folder every N secs (0=off)
     "autostart": False,
+    "show_console": False,        # true = visible log terminal; false = hidden background
     "debug": False,
 }
 
@@ -117,6 +118,7 @@ _TOP_LEVEL_RULES = {
     "download_max_height": (lambda v: _is_num(v) and v > 0 and float(v).is_integer(), DEFAULTS["download_max_height"]),
     "rescan_seconds": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["rescan_seconds"]),
     "autostart": (_is_bool, DEFAULTS["autostart"]),
+    "show_console": (_is_bool, DEFAULTS["show_console"]),
     "debug": (_is_bool, DEFAULTS["debug"]),
 }
 
