@@ -1,8 +1,34 @@
-more config as in if the image should stretch over the screen or the video. if the media should fit the screen vertically or horizontally
-if the image can appear at random positions or a set position and size (hello neighbor subscribe gif appearing in the bottom right or smth)
+config to how the media covers the screens should it stretch to the ratio of the screen (stretch) should it fit the entire screen horizontally (cover-height) should it fit the entire screen vertically (cover-width) or simply fit the screen without stretching (fit) ## get rid of cover entirely - DONE
+
+config to position the media with X and y coordinates that are relative to screen size where when X = 0  the left edge of the media sticks to the left of the screen and X = 1 right edge of the media sticks to the right edge of the screen
+Y=0 top edge of the media sticks to the top edge of the screen and Y=1 bottom edge of the media sticks to the bottom edge of the screen with the default position being X=0.5 and Y=0.5 for positioning
+also media scale in the X an Y with scale X stretchning the media width wise and Scale Y stretching the media height wise default is X = 1 and Y = 1 to fit the entire screen. as it is also relative where the media will try to "fit" the screen width wise or height wise as long as its not cropped off screen
+also the ability to flip the media horizontally/vertically or rotate it a certain amount. - DONE
+
+ability to set a max_duration for global config and per media config that will stop the video/image/gif and their sidecar when the timer runs out - DONE
+
+note that these setting only apply when the mode parameter in the config of the per file media or the default config is set to "custom" else these parameters will be ignored  - DONE
+
+ability to change the speed of moving media like gifs video and audio that comes with images and change the audio pitch of videos and audio. - DONE
+
+add fade in just like fade out with fade in being its own time meaning a media would last fade_in_seconds + image_display_seconds + fade_out_seconds - DONE
+
+add opacity parameter
+
+ability to randomize these values by giving a value as 0-1 instead of a single number meaning the randomness will be from 0 to 1 for any numerical value (delimiter can be customized in the script for ease of use for the user to configure later (not in the config.json file but as a variable that can be set in the script that reads the config))
+so far the values that can be randomized are the positions rotations scale if the media should be flipped horizontally or vertically, display seconds, fade in, fade out, length of media and almost any numerical value/categorical value
+
+adding weights parameter for per media config to alter the chances of the media being picked for example weight 2 means its twice as likely to be picked than weight 1 media.
+
+normal scale value instead of scale x and scale y as a parameter
+
+stuff to add later:
+
 additionally chroma key implementation for easier access to the green screen videos that can be directly downloaded
 
 easier configuration page and gui instead of the raw config.json 
+
+config to play random audiocues along with the image or something
 
 kill button or something when the thing just wont stop
 
@@ -10,4 +36,4 @@ switch builder to directly use C++ to save space cuz damn what do you mean 200mb
 
 media that appears on top should ignore cursor to allow games to keep the mouse locked - Done
 
-idk what else to add for now. maybe a release build when most of the things work.
+idk what else to add for now. maybe a release build when most of the things work. - Done more issues to come

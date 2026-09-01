@@ -67,3 +67,70 @@ def extract_audio(video_path: str) -> str | None:
         return None
     log.debug("extracted audio to %s", tmp)
     return tmp
+
+
+def _sample_rate(path: str) -> int:
+    """Best-effort probe of the audio sample rate (Hz). Fallback 48000."""
+    ffprobe = shutil.which("ffprobe") or find_ffmpeg()
+    if ffprobe is None:
+        return 48000
+    try:
+        cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
+               "-show_entries", "stream=sample_rate", "-of", "csv=p=0", path]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return int(out.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError, OSError, subprocess.TimeoutExpired):
+        return 48000
+
+
+def _atempo_chain(value: float, parts: list[str] | None = None) -> list[str]:
+    """Build ffmpeg atempo filter list for an arbitrary time-stretch factor.
+    atempo is limited to [0.5, 2.0] per filter; split multiplicatively."""
+    if parts is None:
+        parts = []
+    if value > 2.0:
+        parts.append("atempo=2.0")
+        return _atempo_chain(value / 2.0, parts)
+    if value < 0.5:
+        parts.append("atempo=0.5")
+        return _atempo_chain(value / 0.5, parts)
+    parts.append(f"atempo={value:.6f}")
+    return parts
+
+
+def pitch_shift(path: str, pitch: float = 1.0, speed: float = 1.0) -> str | None:
+    """Bake pitch and tempo changes into a temp audio file.
+
+    pitch: frequency multiplier (1.0 = unchanged; >1 = higher pitch).
+    speed: playback-tempo multiplier, independent of pitch (1.0 = unchanged;
+          >1 = faster, pitch stable).
+
+    Uses asetrate to shift the sample rate (pitch), aresample to restore the
+    rate, then an atempo chain so the final tempo = speed. Result: audio that
+    plays at `speed` speed and `pitch` pitch with the ORIGINAL duration
+    scaled only by 1/speed. Returns the temp file path (caller deletes it),
+    or None on failure / missing ffmpeg.
+    """
+    if pitch == 1.0 and speed == 1.0:
+        return path
+    ffmpeg = find_ffmpeg()
+    if ffmpeg is None:
+        log.warning("ffmpeg not found — speed/pitch disabled for %s", path)
+        return None
+    sr = _sample_rate(path)
+    tempo = speed / pitch
+    filters = [f"asetrate={sr * pitch:.0f}", f"aresample={sr}"] + _atempo_chain(tempo)
+    tmp = tempfile.mktemp(suffix=".m4a", prefix="dyst_speed_")
+    cmd = [ffmpeg, "-y", "-v", "error", "-i", path, "-vn", "-c:a", "aac",
+           "-b:a", "160k", "-af", ",".join(filters), tmp]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not os.path.isfile(tmp):
+        log.warning("speed/pitch bake failed for %s (%s)", path,
+                    result.stderr.strip()[:120])
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None
+    log.debug("baked speed=%s pitch=%s audio to %s", speed, pitch, tmp)
+    return tmp

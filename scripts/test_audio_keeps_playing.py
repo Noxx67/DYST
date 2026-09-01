@@ -66,7 +66,7 @@ def main() -> int:
 
     # --- Case 1: image WITHOUT audio -> fast fade + close, no audio player ---
     win = OverlayWindow()
-    assert win.load(img, "image", image_seconds=0.2, fade_seconds=0.1)
+    assert win.load(img, "image", image_seconds=0.2, fade_out_seconds=0.1)
     assert win._audio_player is None, "no sidecar -> no audio player"
     win.show()
     win.start()
@@ -80,7 +80,7 @@ def main() -> int:
 
     # --- Case 2: image WITH sidecar audio -> fade starts, audio kept alive ---
     win = OverlayWindow()
-    assert win.load(img, "image", image_seconds=0.2, fade_seconds=0.1,
+    assert win.load(img, "image", image_seconds=0.2, fade_out_seconds=0.1,
                     sidecar_audio=wav)
     win.show()
     win.start()

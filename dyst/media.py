@@ -19,7 +19,18 @@ IMAGE_EXTS = {".png", ".gif", ".apng", ".webp", ".jpg", ".jpeg", ".bmp"}
 VIDEO_EXTS = {".mp4", ".webm", ".avi", ".mov", ".mkv"}
 # Audio sidecars, in preference order (first available wins).
 AUDIO_EXTS = [".mp3", ".wav", ".ogg", ".flac", ".m4a"]
-VALID_MODES = {"fit", "cover", "stretch"}
+# How media covers the screen. "cover" was removed per user request
+# (morestufftoadd.txt): fit  = whole media visible, letterboxed, centered
+#                        stretch = squish to exactly the screen size
+#                        cover-height = fit the entire screen horizontally
+#                            (scale by width; media taller than the screen is
+#                            cropped top/bottom, wider is letterboxed)
+#                        cover-width = fit the entire screen vertically
+#                            (scale by height; media wider than the screen is
+#                            cropped left/right, taller is letterboxed)
+#                        custom = position/scale/flip/rotation layout (see
+#                            _validate_settings; values ignored unless custom)
+VALID_MODES = {"fit", "cover-height", "cover-width", "stretch", "custom"}
 
 
 @dataclass
@@ -169,6 +180,23 @@ def _parse_txt_settings(path: str) -> dict:
     return data
 
 
+def _parse_bool(v: object) -> bool | str | None:
+    """Parse a boolean from JSON (real bool) or TXT ("true"/"1"/"yes"/"on"
+    etc.). Returns the string "random" when "random" is given, None when
+    unrecognized."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s == "random":
+            return "random"
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+    return None
+
+
 def _validate_settings(path: str, raw: dict) -> dict:
     """Keep only known, valid keys. Unknown/invalid entries are dropped
     (with a warning) rather than rejecting the whole file."""
@@ -178,7 +206,7 @@ def _validate_settings(path: str, raw: dict) -> dict:
         if isinstance(mode, str) and mode.lower() in VALID_MODES:
             out["mode"] = mode.lower()
         else:
-            log.warning("media: %s: invalid mode %r (use fit/cover/stretch)", path, mode)
+            log.warning("media: %s: invalid mode %r (use fit/stretch/cover-height/cover-width/custom)", path, mode)
     duration = raw.get("duration")
     if duration is not None:
         try:
@@ -209,16 +237,199 @@ def _validate_settings(path: str, raw: dict) -> dict:
                 log.warning("media: %s: image_display_seconds must be > 0", path)
         except (TypeError, ValueError):
             log.warning("media: %s: invalid image_display_seconds %r", path, image_display)
-    fade = raw.get("fade_seconds")
+    # fade_out_seconds (renamed from fade_seconds; the old name is accepted
+    # as a deprecated alias so existing sidecars keep working).
+    fade = raw.get("fade_out_seconds")
+    if fade is None:
+        fade = raw.get("fade_seconds")
+        if fade is not None:
+            log.warning("media: %s: 'fade_seconds' is deprecated — rename it to 'fade_out_seconds'", path)
     if fade is not None:
         try:
             f = float(fade)
             if f >= 0:
-                out["fade_seconds"] = f
+                out["fade_out_seconds"] = f
             else:
-                log.warning("media: %s: fade_seconds must be >= 0", path)
+                log.warning("media: %s: fade_out_seconds must be >= 0", path)
         except (TypeError, ValueError):
-            log.warning("media: %s: invalid fade_seconds %r", path, fade)
+            log.warning("media: %s: invalid fade_out_seconds %r", path, fade)
+    fade_in = raw.get("fade_in_seconds")
+    if fade_in is not None:
+        try:
+            fi = float(fade_in)
+            if fi >= 0:
+                out["fade_in_seconds"] = fi
+            else:
+                log.warning("media: %s: fade_in_seconds must be >= 0", path)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid fade_in_seconds %r", path, fade_in)
+    opacity = raw.get("opacity")
+    if opacity is not None:
+        try:
+            o = float(opacity)
+            if 0.0 <= o <= 1.0:
+                out["opacity"] = o
+            else:
+                log.warning("media: %s: opacity must be 0..1", path)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid opacity %r", path, opacity)
+    max_duration = raw.get("max_duration")
+    if max_duration is not None:
+        try:
+            md = float(max_duration)
+            if md >= 0:
+                out["max_duration"] = md
+            else:
+                log.warning("media: %s: max_duration must be >= 0 (0 = no cap)", path)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid max_duration %r", path, max_duration)
+    for key, desc in (("speed", "speed must be > 0"), ("pitch", "pitch must be > 0")):
+        val = raw.get(key)
+        if val is None:
+            continue
+        # Check for range format (e.g., "1.5~2.0") first
+        v_str = str(val)
+        if "~" in v_str:
+            parts = v_str.split("~")
+            if len(parts) == 2:
+                try:
+                    lo = float(parts[0])
+                    hi = float(parts[1])
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    out[key] = (lo, hi)
+                    continue
+                except (TypeError, ValueError):
+                    log.warning("media: %s: invalid %s range %r", path, key, val)
+        try:
+            v = float(val)
+            if v > 0:
+                out[key] = v
+            else:
+                log.warning("media: %s: %s", path, desc)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid %s %r", path, key, val)
+    sp = raw.get("speed_pitch")
+    if sp is not None:
+        # Check for range format (e.g., "1.5~2.0") first
+        sp_str = str(sp)
+        if "~" in sp_str:
+            parts = sp_str.split("~")
+            if len(parts) == 2:
+                try:
+                    lo = float(parts[0])
+                    hi = float(parts[1])
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    out["speed_pitch"] = (lo, hi)
+                except (TypeError, ValueError):
+                    log.warning("media: %s: invalid speed_pitch range %r", path, sp)
+                # If range parsing succeeded, skip float parsing
+                if "speed_pitch" in out:
+                    pass
+                else:
+                    # Try float parsing as fallback
+                    try:
+                        spv = float(sp)
+                        if spv >= 0:
+                            out["speed_pitch"] = spv
+                        else:
+                            log.warning("media: %s: speed_pitch must be >= 0 (0 = off)", path)
+                    except (TypeError, ValueError):
+                        log.warning("media: %s: invalid speed_pitch %r", path, sp)
+        else:
+            # Try float parsing as fallback
+            try:
+                spv = float(sp)
+                if spv >= 0:
+                    out["speed_pitch"] = spv
+                else:
+                    log.warning("media: %s: speed_pitch must be >= 0 (0 = off)", path)
+            except (TypeError, ValueError):
+                log.warning("media: %s: invalid speed_pitch %r", path, sp)
+    # ---- custom mode layout (only used when mode == "custom") ----
+    # position_x/y: normalized edge-pinning, -1..2, default 0.5 (centered).
+    #   0 = left/top edge at the screen edge, 1 = right/bottom edge at the
+    #   screen edge; -1 pushes all the way off-screen left, 2 all the way
+    #   off-screen right, so media can peek in / be cropped (e.g. 1.5).
+    # scale_x/y: relative multipliers of the "fit" size (1,1 = whole media
+    #     visible, aspect kept, nothing cropped), must be > 0.
+    # rotation: degrees, any number. flip_h / flip_v: booleans.
+    for key, (valid, desc) in {
+        "position_x": (lambda v: -1.0 <= v <= 2.0, "-1..2"),
+        "position_y": (lambda v: -1.0 <= v <= 2.0, "-1..2"),
+        "scale_x": (lambda v: v > 0, "> 0"),
+        "scale_y": (lambda v: v > 0, "> 0"),
+        "rotation": (lambda v: True, "a number"),
+    }.items():
+        val = raw.get(key)
+        if val is None:
+            continue
+        # Check for range format (e.g., "1.5~2.0") first
+        v_str = str(val)
+        if "~" in v_str:
+            parts = v_str.split("~")
+            if len(parts) == 2:
+                try:
+                    lo = float(parts[0])
+                    hi = float(parts[1])
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    out[key] = (lo, hi)
+                    continue
+                except (TypeError, ValueError):
+                    log.warning("media: %s: invalid %s range %r", path, key, val)
+        try:
+            v = float(val)
+            if valid(v):
+                out[key] = v
+            else:
+                log.warning("media: %s: %s must be %s", path, key, desc)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid %s %r", path, key, val)
+    for key in ("flip_h", "flip_v"):
+        val = raw.get(key)
+        if val is None:
+            continue
+        b = _parse_bool(val)
+        if b is not None:
+            out[key] = b
+        else:
+            log.warning("media: %s: invalid %s %r (use true/false)", path, key, val)
+
+    # Randomization support: values given as "min~max" range
+    # (separator defaults to "~"). Single values are kept as-is.
+    # Booleans can use "random" to randomize true/false.
+    RANDOM_KEYS = (
+        "position_x", "position_y", "scale_x", "scale_y",
+        "rotation", "speed", "pitch", "speed_pitch",
+        "image_display_seconds", "fade_in_seconds", "fade_out_seconds",
+        "opacity", "max_duration", 
+        "volume", 
+    )
+    RANDOM_DELIMITER = "~"  # configurable separator
+    for key in RANDOM_KEYS:
+        val = raw.get(key)
+        if val is None:
+            continue
+        if key in ("flip_h", "flip_v"):
+            continue  # booleans handled separately
+        v_str = str(val)
+        if RANDOM_DELIMITER in v_str:
+            parts = v_str.split(RANDOM_DELIMITER)
+            if len(parts) == 2:
+                try:
+                    lo = float(parts[0])
+                    hi = float(parts[1])
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    out[key] = (lo, hi)
+                except (TypeError, ValueError):
+                    log.warning("media: %s: invalid %s range %r", path, key, val)
+            else:
+                # Single value - will be validated by existing code above
+                pass
+        # Boolean randomization: "random" keyword handled by _parse_bool above
     return out
 
 

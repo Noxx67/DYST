@@ -367,6 +367,265 @@ controlled by a config flag — `true` = launch as terminal, `false` = hidden ba
 console window flash at startup (before `FreeConsole()` runs — happens after config load).
 It's the shortest possible hide point without a second (console) build.
 
+### 1b — cover modes (morestufftoadd.txt feature 1) ✅ DONE & VERIFIED
+
+Implemented the first requested feature from `morestufftoadd.txt`:
+
+- **Removed `cover`**; replaced with `cover-height` / `cover-width`.
+  - `stretch` — squish to exactly the screen size.
+  - `cover-height` — **fit the entire screen horizontally**: media width ==
+    screen width; media proportionally taller than the screen cropped
+    top/bottom, wider media letterboxes (transparent bars).
+  - `cover-width` — **fit the entire screen vertically**: media height ==
+    screen height; media proportionally wider than the screen cropped
+    left/right, taller media letterboxes.
+  - `fit` — whole media visible, aspect kept, centered (default).
+  - Old `cover` value now falls back to `fit` with a warning (like any invalid
+    mode).
+- **New global `mode` config key** (default `fit`) in `config.json` so the
+  cover behavior applies to all media without per-file sidecars; per-file
+  sidecar `mode` still wins (`main.py` order: `settings["mode"]` →
+  `config["mode"]` → `fit`).
+- **Files touched:** `dyst/media.py` (VALID_MODES + validation message),
+  `dyst/overlay.py` (mode whitelist in `load()` + new `paintEvent` branches),
+  `dyst/config.py` (global `mode` default + validator), `main.py` (mode
+  fallback), `config.json` (`"mode": "fit"`), `media/images/test_scare.json`
+  (demo sidecar `cover` → `cover-height`), `README.md` / `PLAN.md` /
+  `AGENTS.md` (§8 schema + §9 media guide), `PROGRESS.md`.
+- **Also fixed (pre-existing test breakage):** `test_phase1.py` picked
+  `bear5.png`, whose 5.4s `bear5.mp3` sidecar keeps the overlay alive past the
+  5s wait timeout — it now uses the deterministic generated `test_scare.png`
+  (same approach the video check already used). Added mode checks: exact
+  `VALID_MODES` set, all 4 modes load + render offscreen, `cover` falls back
+  to `fit`.
+- **Verified:** `py_compile` clean; `test_phase0` green; `test_phase1`
+  (offscreen) green incl. new mode checks.
+
+**Next morestufftoadd feature:** `mode: "custom"` — X/Y positioning,
+X/Y scale, flip (horizontal/vertical), rotation, then `max_duration`,
+speed/pitch, fade-in, 0-1 randomization, opacity, weights. These build on
+this mode plumbing when implemented.
+
+### 1c — custom mode (morestufftoadd.txt feature 2) ✅ DONE & VERIFIED
+
+Implemented the second requested feature: `mode: "custom"` — position,
+scale, flip and rotation for media. Semantics (as read from the feature
+request):
+
+- **Base size = the "fit" size** — the aspect-preserving scale that shows the
+  whole media with nothing cropped off screen. `scale_x`/`scale_y` (default
+  `1.0` each) are **multipliers of that fit size**, so `1×1` renders exactly
+  like `fit`; `scale_x=2` doubles the width (stretch width-wise), `scale_y=0.5`
+  halves the height. Scaling up beyond the screen crops the overflow.
+- **Position** (`position_x`/`position_y`, default `0.5`): normalized
+  edge-pinning. `x = (screen_w - disp_w) * position_x` → X=0 pins the left
+  edge to the screen's left edge, X=1 pins the right edge to the screen's
+  right edge, 0.5 centers. Same for Y (top/bottom). Range widened per user
+  request from 0..1 to **-1..2**: values outside 0..1 push the media
+  off-screen so it can peek in / be cropped at the screen edge (e.g. 1.5
+  pokes out past the right edge). Same linear formula, so 0/1 behave exactly
+  as before.
+- **Flip** (`flip_h`/`flip_v`, bool) mirrors the image before drawing;
+  **rotation** (degrees) rotates around the placed rect's center.
+- These keys are **ignored unless `mode` is `custom`** (per-file sidecar wins
+  over the global `config.json` keys, matching the feature note).
+
+**Files touched:** `dyst/media.py` (VALID_MODES + `_parse_bool` + new
+settings keys in `_validate_settings`), `dyst/config.py` (7 new global
+keys + validators; `mode` validator accepts `custom`), `dyst/overlay.py`
+(`load(..., custom=)` + `_apply_custom` + `_custom_target` + paintEvent
+branch), `main.py` (per-file-over-global merge in `_spawn_overlay`),
+`config.json` (new keys), `README.md` / `PLAN.md` / `AGENTS.md` (§2, §6,
+§8, §9) / `PROGRESS.md`, `scripts/test_phase1.py` (custom-mode checks).
+
+**Verified:** `py_compile` clean; `test_phase0` green; `test_phase1`
+(offscreen) green incl. new custom checks — layout math (100x100 image in
+1000x500 window: fit=5 → 250x500 at scale 0.5×1; X=0 → x=0, X=1 → x=750),
+position range −1..2 (x = 1125 at 1.5, off-screen below at y=2, −750 at −1,
+clamped to [−1,2]), flip H/V + 45° rotation renders the red test square
+(pixel scan), JSON and TXT sidecars parse all custom keys, invalid values
+(out-of-range position, negative scale, non-bool flip, non-numeric rotation)
+are dropped with warnings.
+
+**Next morestufftoadd features:** `max_duration` (global + per-file hard
+stop) ✅ DONE — playback speed + audio pitch, fade-in, 0-1 randomization,
+opacity, weights.
+
+### 1d — max_duration (morestufftoadd.txt feature 3) ✅ DONE & VERIFIED
+
+Implemented the third requested feature: a hard cap on any overlay.
+
+- **Global `max_duration` config key** (default `0` = no cap) and **per-file
+  `max_duration`** in the settings sidecar (>= 0; per-file wins over global;
+  a per-file `0` explicitly disables a global cap — handled with an `in
+  settings` check rather than `or`, so 0 is meaningful).
+- When the timer runs out, the video/image/gif **and any audio** (sidecar /
+  extracted / embedded) are force-stopped **immediately** and the overlay
+  closes **instantly with NO fade-out** (user follow-up request).
+- **Implementation:** a single-shot `QTimer` (`_max_timer`) armed in
+  `start()`, fires `_on_max_duration()` which stops video timer / Qt player /
+  GIF timer / audio player, marks visual + fade done, and calls
+  `_finish_close()` directly — the overlay disappears instantly.
+  Also replaced the image end's non-cancellable `QTimer.singleShot` with a
+  cancellable member `_image_end_timer` (both stopped in `_finish_close`) so
+  no pending timer can fire on a deleted widget after force-close.
+- **Files touched:** `dyst/overlay.py` (state, `load(..., max_duration=)`,
+  `_start_max_timer`, `_on_max_duration`, `_finish_close` cleanup),
+  `dyst/config.py`, `dyst/media.py`, `main.py` (per-file-over-global merge),
+  `config.json`, `media/images/woolly-mammoth.json` (new key + hint),
+  README/PLAN/AGENTS/PROGRESS docs, `scripts/test_phase1.py` (3 checks).
+- **Verified:** `py_compile` clean; `test_phase0` green; `test_phase1` green —
+  image set to 10s display + fade 1.0 capped at 0.3s finishes in ~0.3s (a
+  fade would take ~1.3s — proves no fade runs); the same with a 5.4s
+  `bear5.mp3` sidecar still finishes fast (audio force-stopped instantly); a
+  1s video with fade 1.0 capped at 0.3s finishes early. Sidecar parsing:
+  `max_duration: 2.5` loads, `-1` is dropped with a warning.
+
+**Next morestufftoadd features:** playback speed + audio pitch ✅ DONE —
+fade-in, 0-1 randomization, opacity, weights.
+
+### 1e — speed + pitch (morestufftoadd.txt feature 4) ✅ DONE & VERIFIED
+
+Implemented the fourth requested feature:
+
+- **speed** (>0, default 1) — applies to videos (frame rate + own audio),
+  GIF animation, and sidecar audio. For QtMultimedia (video-qt) with pitch==1
+  it uses `setPlaybackRate` (tape-style: pitch follows speed). For the OpenCV
+  paths the frame timer interval is scaled by 1/speed; GIF frame delays are
+  divided by speed; the GIF visual-end timer uses `gif_ms/speed`.
+- **pitch** (>0, default 1) — audio pitch independent of speed. QtMultimedia
+  has no pitch API, so pitched audio is baked into a temp file via ffmpeg
+  (`asetrate=sr*pitch,aresample=sr` + an `atempo` chain so tempo = speed/pitch):
+  final result = pitch ×, tempo = speed ×, duration scaled only by 1/speed.
+  - `dyst/ffmpeg_util.py::pitch_shift(path, pitch, speed)` (+ `_sample_rate`,
+    `_atempo_chain`) — the new bake; returns the temp path (caller cleans).
+  - `overlay._prepare_audio_file(path)` — returns the original when speed/pitch
+    are 1/1 (zero overhead), else bakes and tracks the temp for cleanup.
+  - `_create_audio_player` uses the prepared file (rate 1.0 — no double pitch).
+  - `_load_video_qt`: pitch != 1 and no sidecar → extracts the embedded track,
+    bakes it, mutes embedded (dual-player pattern, same as sidecar-wins).
+  - `_load_video_av1`: extracted track baked when needed (both temps cleaned).
+  - Temp-file tracking unified: `_temp_files` list + existing `_temp_audio`,
+    all removed in `_finish_close`.
+- **Files touched:** `dyst/ffmpeg_util.py`, `dyst/overlay.py`, `dyst/media.py`
+  (speed/pitch parsing), `dyst/config.py` (global keys + validators),
+  `main.py` (per-file-over-global merge), `config.json`, mammoth json (+
+  hints), README/PLAN/AGENTS/PROGRESS, `scripts/test_phase1.py` (3 checks).
+- **Verified:** `py_compile` clean; test_phase0 green; test_phase1 green —
+  1s clip at 2x finishes ~0.5s, at 0.5x ~2s; `_prepare_audio_file` returns the
+  original at 1/1 and a tracked temp at (1.5, 2.0); ffprobe: 5.387s sidecar
+  baked at (speed 2, pitch 1.5) = 2.698s == 5.387/2 — speed scales tempo,
+  pitch independent. CLI `--play` with a speed=2/pitch=1.5 TXT sidecar exits 0.
+
+**Next morestufftoadd features:** fade-in (fade_in_seconds), 0-1
+randomization, opacity, weights.
+
+### 1f — speed_pitch + speed affects images (morestufftoadd follow-up) ✅ DONE & VERIFIED
+
+Follow-up on feature 4:
+
+- **`speed_pitch`** (global + per-file, >= 0, default 0 = off): a combined
+  speed+pitch multiplier. When set (> 0) it OVERRIDES the individual
+  `speed`/`pitch` keys and sets BOTH to the same value, so the two can be
+  edited (and later randomized) together. Priority in `main.resolve_speed_pitch`
+  (new helper): per-file speed_pitch > global speed_pitch > per-file
+  speed/pitch > global speed/pitch.
+- **Speed now affects images too**: image display time and fade-out are
+  divided by speed (`start()` delay = image_seconds*1000/speed; GIF anim
+  delay = max(image_seconds, gif_duration)/speed; `_start_fade` duration =
+  fade_seconds*1000/speed). So speed time-scales the WHOLE overlay — videos,
+  gifs, sidecar/embedded audio, image hold time, and fades. (Fade-in will
+  scale the same way when added next.)
+- **Files touched:** `dyst/media.py` (speed_pitch parsing), `dyst/config.py`
+  (global key + `_is_nonnegative` validator), `main.py` (`resolve_speed_pitch`
+  helper + usage + --play merge), `dyst/overlay.py` (image/fade /speed),
+  `config.json`, mammoth json (+ hint; user's speed/pitch 2.0 test values kept),
+  README/PLAN/AGENTS/PROGRESS, `scripts/test_phase1.py` (3 new checks).
+- **Verified:** `py_compile` clean; test_phase0 green; test_phase1 green —
+  `resolve_speed_pitch` priority matrix (global sp=2 → (2,2); per-file sp=3 →
+  (3,3); global sp overrides per-file individual speed; no sp → per-file
+  speed/pitch);
+  image at 2x speed displays ~0.5s (unscaled 1s); image+fade at 2x ≈ 1.0s
+  (unscaled 2s, proves the fade scales too). Sidecar parsing: speed_pitch=1.5
+  loads, -3 dropped.
+
+**Next morestufftoadd features:** fade-in (fade_in_seconds), 0-1
+randomization, opacity, weights.
+
+### 1f-2 — max_duration x speed semantics + close guard ✅ DONE & VERIFIED
+
+- **Semantics clarified:** `max_duration` is a **wall-clock cap in real
+  seconds** — it is NOT divided by speed (`_start_max_timer` arms
+  `max_duration*1000` ms from `start()`), while everything else (video/gif
+  playback, image hold, fades, audio tempo) scales by 1/speed. So at 2x speed
+  media finishes sooner (cap fires less often) and at 0.5x the cap becomes the
+  effective controller. This asymmetry is intentional (a cap should stay a
+  real-time limit); can be changed to media-time on request.
+- **Race fixed:** since fades now shrink with speed, `max_duration` can fire
+  mid-fade (natural end starts a fade at time T; max lands between T and
+  T+fade). Added a one-shot `_closing` guard in `_finish_close` so teardown
+  + `finished.emit()` run exactly once (double `deleteLater`/double emit
+  was previously benign but sloppy).
+- **Files touched:** `dyst/overlay.py` (`_closing` flag),
+  `scripts/test_phase1.py` (regression check), `PROGRESS.md`.
+- **Verified:** py_compile clean; test_phase0 green; test_phase1 green —
+  new check: fade started, `_on_max_duration()` mid-fade, `_fade_finished()`
+  afterwards → `finished` emitted exactly once.
+
+### 1g — fade-in (morestufftoadd.txt feature 5) ✅ DONE & VERIFIED
+
+Implemented the fifth requested feature: `fade_in_seconds`.
+
+- **Global `fade_in_seconds`** (default 0 = off) + per-file override in the
+  settings sidecar (>= 0, images/GIFs only — videos ignore it, consistent with
+  the locked "videos end instantly" decision).
+- **Lifetime formula (as requested):** fade_in + display + fade_out — the
+  fade-in runs FIRST (opacity 0→1, scaled by 1/speed), and the display clock
+  (image_end timer) starts only when the fade-in completes (`_on_fade_in_finished`).
+- Overlay is set to opacity 0 in `load()` when fade-in is configured, so the
+  window is invisible from the moment it's shown (no flash before `start()`).
+- GIFs animate during the fade-in (natural look); the frame clock and the
+  display clock are independent.
+- Sidecar audio starts immediately (unchanged behavior).
+- `max_duration` cuts instantly through a running fade-in (`_fade_in.stop()`
+  in `_on_max_duration`/`_start_fade`/`_finish_close`; `_on_fade_in_finished`
+  is `_closing`-guarded so a finished fade-in can't start the display timer
+  after close began).
+- **Files touched:** `dyst/config.py`, `dyst/media.py`, `main.py` (image-only
+  per-file resolution + load() param + --play merge), `dyst/overlay.py`,
+  `config.json`, mammoth json (+ hint), README/PLAN/AGENTS/PROGRESS,
+  `scripts/test_phase1.py` (2 new checks).
+- **Verified:** py_compile clean; test_phase0 green; test_phase1 green —
+  image with fade_in=0.4 + display=0.2 starts fully transparent, opacity is
+  mid-animation (~0.35) at 0.15s, finishes ~0.6s (vs 0.2s without fade-in);
+  fade-in scales with speed (0.4s at 2x → total ~0.3s).
+
+**Next morestufftoadd features:** 0-1 randomization, opacity, weights.
+
+### 1h — fade_seconds → fade_out_seconds rename ✅ DONE & VERIFIED
+
+Renamed `fade_seconds` to `fade_out_seconds` everywhere (user request) so the
+image config reads `image_display_seconds`, `fade_in_seconds`,
+`fade_out_seconds`:
+
+- Global config key, per-file sidecar key, `OverlayWindow.load(...,`
+  `fade_out_seconds=)` param, `self._fade_out_seconds`, `main.py` resolution
+  + `--play` merge, `config.json`, mammoth json (+ hint), tests, docs.
+- **Backward compat:** the old `fade_seconds` name still works in BOTH
+  `config.json` and per-file sidecars as a deprecated alias (logged warning
+  asking to rename); the new `fade_out_seconds` key wins when both are
+  present. Project's own `config.json` + mammoth json were migrated to the
+  new name.
+- **Files touched:** `dyst/config.py` (DEFAULTS + rule + loader alias),
+  `dyst/media.py` (canonical parse + sidecar alias), `dyst/overlay.py`,
+  `main.py`, `config.json`, `media/images/woolly-mammoth.json`,
+  `scripts/test_phase0.py`, `scripts/test_phase1.py`,
+  `scripts/test_audio_keeps_playing.py`, README/PLAN/AGENTS/PROGRESS.
+- **Verified:** py_compile clean; test_phase0 green; test_phase1 green;
+  alias checks (config alias honored, both-keys → new wins, sidecar old name
+  mapped to `fade_out_seconds`, mammoth migrated), CLI `--play` with the new
+  key exits 0.
+
 ## Environment notes
 
 - **Working dir:** `C:/Users/ahmed/Downloads/Pi/`

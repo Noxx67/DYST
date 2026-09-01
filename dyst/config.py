@@ -39,11 +39,26 @@ DEFAULTS: Dict[str, Any] = {
     # Media
     "media_folder": "media",
     "image_display_seconds": 1.0,
-    "fade_seconds": 0.2,
+    "fade_out_seconds": 0.2,
+    "fade_in_seconds": 0.0,  # fade-in before display (images/gifs); 0 = off
+    "opacity": 1.0,          # overlay opacity 0.0-1.0 (1 = fully opaque)
+    "max_duration": 0.0,     # hard cap (seconds) on any overlay; 0 = play to natural end
+    "speed": 1.0,            # playback speed multiplier (>0): videos/gifs/audio/images/fades
+    "pitch": 1.0,            # audio pitch multiplier (>0): sidecar + audio-bearing media
+    "speed_pitch": 0.0,      # combined speed+pitch: >0 sets BOTH and overrides speed/pitch; 0 = off
     # Display
     "monitor": "primary",
+    "mode": "fit",  # how media covers the screen (fit/stretch/cover-height/cover-width/custom)
+    # Custom-mode layout (only used when mode == "custom"; per-file sidecar wins)
+    "position_x": 0.5,   # normalized X: 0 = left edge at screen left, 1 = right edge at screen right, -1..2 allowed (peek/crop)
+    "position_y": 0.5,   # normalized Y: 0 = top edge at screen top, 1 = bottom edge at screen bottom, -1..2 allowed (peek/crop)
+    "scale_x": 1.0,      # width multiplier relative to the "fit" size (1 = whole media visible, aspect kept)
+    "scale_y": 1.0,      # height multiplier relative to the "fit" size
+    "flip_h": False,     # mirror horizontally
+    "flip_v": False,     # mirror vertically
+    "rotation": 0.0,     # degrees (around the placed rect's center)
     # Audio
-    "audio_volume": 0.8,
+    "volume": 0.8,              # master volume 0.0-1.0
     # Chroma key
     "chroma_key": {
         "enabled": True,
@@ -112,9 +127,23 @@ _TOP_LEVEL_RULES = {
     "reroll_in_same_tick": (_is_bool, DEFAULTS["reroll_in_same_tick"]),
     "media_folder": (lambda v: isinstance(v, str) and v != "", DEFAULTS["media_folder"]),
     "image_display_seconds": (_is_positive, DEFAULTS["image_display_seconds"]),
-    "fade_seconds": (_is_nonnegative, DEFAULTS["fade_seconds"]),
+    "fade_out_seconds": (_is_nonnegative, DEFAULTS["fade_out_seconds"]),
+    "fade_in_seconds": (_is_nonnegative, DEFAULTS["fade_in_seconds"]),
+    "opacity": (_is_volume, DEFAULTS["opacity"]),
+    "max_duration": (_is_nonnegative, DEFAULTS["max_duration"]),
+    "speed": (_is_positive, DEFAULTS["speed"]),
+    "pitch": (_is_positive, DEFAULTS["pitch"]),
+    "speed_pitch": (_is_nonnegative, DEFAULTS["speed_pitch"]),
     "monitor": (_is_monitor, DEFAULTS["monitor"]),
-    "audio_volume": (_is_volume, DEFAULTS["audio_volume"]),
+    "mode": (lambda v: isinstance(v, str) and v in ("fit", "cover-height", "cover-width", "stretch", "custom"), DEFAULTS["mode"]),
+    "position_x": (lambda v: _is_num(v) and -1.0 <= v <= 2.0, DEFAULTS["position_x"]),
+    "position_y": (lambda v: _is_num(v) and -1.0 <= v <= 2.0, DEFAULTS["position_y"]),
+    "scale_x": (_is_positive, DEFAULTS["scale_x"]),
+    "scale_y": (_is_positive, DEFAULTS["scale_y"]),
+    "flip_h": (_is_bool, DEFAULTS["flip_h"]),
+    "flip_v": (_is_bool, DEFAULTS["flip_v"]),
+    "rotation": (_is_num, DEFAULTS["rotation"]),
+    "volume": (_is_volume, DEFAULTS["volume"]),
     "download_max_height": (lambda v: _is_num(v) and v > 0 and float(v).is_integer(), DEFAULTS["download_max_height"]),
     "rescan_seconds": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["rescan_seconds"]),
     "autostart": (_is_bool, DEFAULTS["autostart"]),
@@ -184,6 +213,15 @@ def load_config(path: str) -> Dict[str, Any]:
 
                 if "chroma_key" in user:
                     cfg["chroma_key"] = _validate_chroma_key(user["chroma_key"])
+
+                # Deprecated alias: "fade_seconds" -> "fade_out_seconds".
+                # The new key wins when both are present.
+                if "fade_seconds" in user and "fade_out_seconds" not in user:
+                    if _is_nonnegative(user["fade_seconds"]):
+                        cfg["fade_out_seconds"] = user["fade_seconds"]
+                        log.warning("config: 'fade_seconds' is deprecated — rename it to 'fade_out_seconds' in %s", path)
+                    else:
+                        log.warning("config: invalid 'fade_seconds' %r — ignoring", user["fade_seconds"])
             else:
                 log.warning("config: root of %s is not an object — using defaults", path)
         except (json.JSONDecodeError, OSError) as exc:

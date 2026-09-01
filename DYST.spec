@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
+import os
 
+excludes = []
 hiddenimports = []
 hiddenimports += collect_submodules('dyst')
 
@@ -68,12 +70,20 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('config.json', '.'),
+        ('video-urls.txt', '.'),
+        ('run.bat', '.'),
+    ] + [
+        (os.path.join(root, f), os.path.join('media', os.path.relpath(root, 'media')))
+        for root, _, files in os.walk('media')
+        for f in files
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=excludes,
     noarchive=False,
     optimize=0,
 )

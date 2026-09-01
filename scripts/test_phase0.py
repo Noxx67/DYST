@@ -56,14 +56,14 @@ def main() -> int:
             "odds": 50,
             "max_concurrent": 0,
             "chroma_key": {"enabled": False, "hue_range": [40, 80]},
-            "audio_volume": 0.5,
+            "volume": 0.5,
         }
         p = _write(tmp, "valid.json", user)
         c = cfg.load_config(p)
         assert c["tick_seconds"] == 5.0, c
         assert c["odds"] == 50, c
         assert c["max_concurrent"] == 0, c
-        assert c["audio_volume"] == 0.5, c
+        assert c["volume"] == 0.5, c
         assert c["reroll_in_same_tick"] is True, c  # untouched -> default
         assert c["chroma_key"]["enabled"] is False, c
         assert c["chroma_key"]["hue_range"] == [40, 80], c
@@ -86,21 +86,21 @@ def main() -> int:
         bad = {
             "tick_seconds": -3,          # <= 0
             "odds": "abc",               # non-numeric
-            "audio_volume": 5,           # > 1
+            "volume": 5,           # > 1
             "monitor": "ultrawide",      # not 'primary'/int
             "max_concurrent": 2.5,       # non-integer
             "chroma_key": {"hue_range": [400, 500]},  # out of range
-            "fade_seconds": -1,          # negative
+            "fade_out_seconds": -1,      # negative
             "chroma_key": "not-a-dict",
         }
         p = _write(tmp, "badvals.json", bad)
         c = cfg.load_config(p)
         assert c["tick_seconds"] == cfg.DEFAULTS["tick_seconds"], c
         assert c["odds"] == cfg.DEFAULTS["odds"], c
-        assert c["audio_volume"] == cfg.DEFAULTS["audio_volume"], c
+        assert c["volume"] == cfg.DEFAULTS["volume"], c
         assert c["monitor"] == cfg.DEFAULTS["monitor"], c
         assert c["max_concurrent"] == cfg.DEFAULTS["max_concurrent"], c
-        assert c["fade_seconds"] == cfg.DEFAULTS["fade_seconds"], c
+        assert c["fade_out_seconds"] == cfg.DEFAULTS["fade_out_seconds"], c
         assert c["chroma_key"] == cfg.DEFAULTS["chroma_key"], c
         print("PASS invalid values -> defaults")
 

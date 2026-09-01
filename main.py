@@ -24,6 +24,51 @@ from dyst.media import _validate_settings
 log = logging.getLogger("dyst.main")
 
 
+def resolve_speed_pitch(settings: dict, config: dict) -> tuple[float, float]:
+    """Resolve the effective (speed, pitch) from per-file settings + config.
+
+    `speed_pitch` (per-file > global) sets BOTH speed and pitch to the same
+    value and OVERRIDES the individual speed/pitch keys; otherwise per-file
+    speed/pitch override global. All default to 1.0.
+    Values can be single numbers or tuples (lo, hi) for randomization.
+    """
+    def _resolve_val(val, default):
+        if val is None:
+            return default
+        if isinstance(val, tuple) and len(val) == 2:
+            try:
+                lo, hi = val
+                return random.uniform(lo, hi)
+            except (TypeError, ValueError):
+                return default
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    sp = settings.get("speed_pitch")
+    if sp is None:
+        sp = config.get("speed_pitch", 0.0)
+    # Handle range tuples (lo, hi) for randomization
+    if isinstance(sp, tuple) and len(sp) == 2:
+        try:
+            lo, hi = sp
+            sp = random.uniform(lo, hi)
+        except (TypeError, ValueError):
+            sp = 0.0
+    else:
+        # Single value - try to convert to float
+        try:
+            sp = float(sp or 0.0)
+        except (TypeError, ValueError):
+            sp = 0.0
+    if sp > 0:
+        return sp, sp
+    speed = _resolve_val(settings.get("speed"), config.get("speed", 1.0))
+    pitch = _resolve_val(settings.get("pitch"), config.get("pitch", 1.0))
+    return speed, pitch
+
+
 def get_base_dir() -> str:
     """Returns the directory of the .exe when compiled, or main.py when running in dev."""
     if getattr(sys, "frozen", False):
@@ -97,27 +142,57 @@ def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None
         kind = item.kind
     settings = item.settings or {}
     # Per-file overrides from the same-named .json/.txt sidecar (AGENTS.md).
-    # NOTE: image_display_seconds / fade_seconds overrides only apply to images;
+    # NOTE: image_display_seconds / fade_out_seconds overrides only apply to images;
     # videos use the global config values (per-file values are ignored).
-    mode = settings.get("mode", "fit")
-    volume = config["audio_volume"] * float(settings.get("volume", 1.0))
+    # mode: per-file sidecar wins; falls back to the global config `mode`
+    # (default "fit"). The removed "cover" value is rejected upstream by
+    # media._validate_settings / config validation.
+    mode = settings.get("mode") or config.get("mode", "fit")
+    # Custom-mode layout (position/scale/flip/rotation) — only used when
+    # mode == "custom"; per-file sidecar wins over the global config keys.
+    custom = {}
+    for key, default in (("position_x", 0.5), ("position_y", 0.5),
+                         ("scale_x", 1.0), ("scale_y", 1.0),
+                         ("flip_h", False), ("flip_v", False),
+                         ("rotation", 0.0)):
+        custom[key] = settings.get(key, config.get(key, default))
+    # max_duration: hard cap on the whole overlay (visual + audio). Per-file
+    # wins over global; 0 = no cap. Uses "in settings" (not `or`) so a per-file
+    # 0 can explicitly disable a global cap.
+    max_duration = (settings["max_duration"] if "max_duration" in settings
+                    else config.get("max_duration", 0.0))
+    # speed / pitch: `speed_pitch` (per-file > global) sets BOTH to the
+    # same value and overrides the individual keys; otherwise per-file
+    # speed/pitch win over global. Defaults 1.0 (no change).
+    speed, pitch = resolve_speed_pitch(settings, config)
+    # opacity: per-file wins over global; 1.0 = fully opaque (default).
+    opacity = float(settings.get("opacity", config.get("opacity", 1.0)))
+    volume = config["volume"] * float(settings.get("volume", 1.0))
     if item.kind == "image":
         image_seconds = settings.get("image_display_seconds",
                                      settings.get("duration",
                                                   config["image_display_seconds"]))
-        fade_seconds = settings.get("fade_seconds", config["fade_seconds"])
+        fade_out_seconds = settings.get("fade_out_seconds", config["fade_out_seconds"])
+        fade_in_seconds = settings.get("fade_in_seconds", config["fade_in_seconds"])
     else:
         image_seconds = config["image_display_seconds"]
-        fade_seconds = config["fade_seconds"]
-    print(f"[CONFIG] Global image_display_seconds={cfg.DEFAULTS['image_display_seconds']}, fade_seconds={cfg.DEFAULTS['fade_seconds']}")
-    print(f"[CONFIG] Per-file image_display_seconds={settings.get('image_display_seconds')}, fade_seconds={settings.get('fade_seconds')}")
-    print(f"[CONFIG] Using image_seconds={image_seconds}, fade_seconds={fade_seconds} for {item.kind}")
+        fade_out_seconds = config["fade_out_seconds"]
+        fade_in_seconds = 0.0  # videos don't fade in (they also end instantly)
+    print(f"[CONFIG] Global image_display_seconds={cfg.DEFAULTS['image_display_seconds']}, fade_out_seconds={cfg.DEFAULTS['fade_out_seconds']}")
+    print(f"[CONFIG] Per-file image_display_seconds={settings.get('image_display_seconds')}, fade_out_seconds={settings.get('fade_out_seconds')}")
+    print(f"[CONFIG] Using image_seconds={image_seconds}, fade_out_seconds={fade_out_seconds} for {item.kind}")
     win = OverlayWindow()
     if not win.load(item.path, kind,
                     image_seconds=image_seconds,
-                    fade_seconds=fade_seconds,
-                    audio_volume=volume,
+                    fade_out_seconds=fade_out_seconds,
+                    fade_in_seconds=fade_in_seconds,
+                    opacity=opacity,
+                    volume=volume,
                     mode=mode,
+                    custom=custom,
+                    max_duration=max_duration,
+                    speed=speed,
+                    pitch=pitch,
                     sidecar_audio=item.sidecar_audio):
         return None
     win.show()
@@ -224,15 +299,19 @@ def _run_qt(config: dict, args) -> int:
             else:
                 # Merge: keep existing mode/volume, add new display settings
                 existing = item.settings
-                for k in ("image_display_seconds", "fade_seconds", "mode", "volume"):
+                for k in ("image_display_seconds", "fade_out_seconds", "fade_in_seconds",
+                          "mode", "volume", "opacity",
+                          "position_x", "position_y", "scale_x", "scale_y",
+                          "flip_h", "flip_v", "rotation", "max_duration",
+                          "speed", "pitch", "speed_pitch"):
                     if k in raw and raw[k] is not None:
                         existing[k] = raw[k]
             break  # Found settings, stop looking
         # Print configuration values
         settings = item.settings or {}
-        print(f"[CONFIG] Global image_display_seconds={cfg.DEFAULTS['image_display_seconds']}, fade_seconds={cfg.DEFAULTS['fade_seconds']}")
-        print(f"[CONFIG] Per-file image_display_seconds={settings.get('image_display_seconds')}, fade_seconds={settings.get('fade_seconds')}")
-        print(f"[CONFIG] Using image_seconds={settings.get('image_display_seconds', cfg.DEFAULTS['image_display_seconds'])}, fade_seconds={settings.get('fade_seconds', cfg.DEFAULTS['fade_seconds'])} for {item.kind}")
+        print(f"[CONFIG] Global image_display_seconds={cfg.DEFAULTS['image_display_seconds']}, fade_out_seconds={cfg.DEFAULTS['fade_out_seconds']}")
+        print(f"[CONFIG] Per-file image_display_seconds={settings.get('image_display_seconds')}, fade_out_seconds={settings.get('fade_out_seconds')}")
+        print(f"[CONFIG] Using image_seconds={settings.get('image_display_seconds', cfg.DEFAULTS['image_display_seconds'])}, fade_out_seconds={settings.get('fade_out_seconds', cfg.DEFAULTS['fade_out_seconds'])} for {item.kind}")
         win = _spawn_overlay(config, item)
         if win is None:
             return 1

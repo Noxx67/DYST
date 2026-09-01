@@ -69,9 +69,24 @@ with a warning, never crash the app.
 
   "media_folder": "media",      // folder with images/ and videos/ subfolders
   "image_display_seconds": 1.0, // how long a still image stays up
-  "fade_seconds": 0.2,          // fade-out duration at end of playback
+  "fade_out_seconds": 0.2,      // fade-out duration at end of playback (renamed from fade_seconds)
+  "fade_in_seconds": 0,         // fade-in before display (images/gifs); 0 = off
+  "max_duration": 0,            // hard cap (seconds) on any overlay + its audio; 0 = no cap
+  "speed": 1.0,                 // playback speed multiplier (>0): videos/gifs/audio/image display + fades
+  "pitch": 1.0,                 // audio pitch multiplier (>0): sidecar + audio-bearing media
+  "speed_pitch": 0,             // combined speed+pitch: >0 sets BOTH and overrides speed/pitch; 0 = off
 
   "monitor": "primary",         // which screen: "primary" or 0-based index
+  "mode": "fit",                // how media covers the screen: fit (default) | stretch | cover-height | cover-width | custom
+
+  // Only used when "mode": "custom" (per-file sidecar values win):
+  "position_x": 0.5,           // X position -1..2: 0 = left edge at screen left, 1 = right edge at screen right, 0.5 = centered; -1 = fully off-screen left, 2 = fully off-screen right (lets media peek in / get cropped)
+  "position_y": 0.5,           // Y position -1..2: 0 = top edge at screen top, 1 = bottom edge at screen bottom, 0.5 = centered; same off-screen range
+  "scale_x": 1.0,              // width multiplier relative to the "fit" size (1 = whole media visible, aspect kept)
+  "scale_y": 1.0,              // height multiplier relative to the "fit" size
+  "flip_h": false,             // mirror horizontally
+  "flip_v": false,             // mirror vertically
+  "rotation": 0,               // rotation in degrees (around the media's center)
 
   "audio_volume": 0.8,          // master volume 0.0–1.0
 
@@ -102,7 +117,7 @@ Put a file with the **same base name** next to a media file to control how
 
 ```json
 {
-  "mode": "cover",
+  "mode": "cover-height",
   "duration": 3,
   "volume": 0.8
 }
@@ -112,27 +127,36 @@ Or a `.txt` version (`media/videos/scare.txt`), one key per line —
 `key=value` **or** `key: value`:
 
 ```
-mode=cover
+mode=cover-height
 duration=3
 volume=0.8
 ```
 
 | Key | Values | Effect |
 |---|---|---|
-| `mode` | `fit` (default) · `cover` · `stretch` | `fit` = keep aspect, letterbox, centered · `cover` = fill the screen, crop the overflow (centered) · `stretch` = fill the screen, squish to fit |
+| `mode` | `fit` (default) · `stretch` · `cover-height` · `cover-width` · `custom` | How the media covers the screen (also set globally via the `mode` key in `config.json`; the sidecar wins). `fit` = whole media visible, aspect kept, centered · `stretch` = squished to exactly the screen size · `cover-height` = fit the entire screen **horizontally** · `cover-width` = fit the entire screen **vertically** · `custom` = use position/scale/flip/rotation below. The old `cover` value was removed — it falls back to `fit`. |
+| `position_x` / `position_y` | −1.0 – 2.0 (default `0.5`) | **Custom mode only.** Where the media sits. `0` pins the edge to the screen edge (`position_x=0` → left edge at screen left), `1` pins the other edge (`position_x=1` → right edge at screen right), `0.5` centers it. Same for Y (top/bottom). Values outside 0–1 push the media **off-screen** so it can peek in or be cropped at the screen edge: `-1` = fully off-screen left/top, `2` = fully off-screen right/bottom, e.g. `1.5` → the media pokes out past the right edge and gets cropped. **Use string format for ranges:** `"-0.5~1.5"` (min~max). |
+| `scale_x` / `scale_y` | any number > 0 (default `1`) | **Custom mode only.** Stretch multipliers relative to the **fit size** (scale 1×1 = whole media visible, aspect kept, nothing cropped). `scale_x=2` doubles the width, `scale_y=0.5` halves the height. If a scaled-up media overflows the screen it's cropped; keep `1×1` (or smaller) to stay fully visible. **Use string format for ranges:** `"0.5~1.5"`. |
+| `flip_h` / `flip_v` | `true` / `false` / `"random"` (default `false`) | **Custom mode only.** Mirror the media horizontally / vertically. **Use string format:** `"random"` to randomly pick true/false on each trigger. |
+| `rotation` | any number (degrees, default `0`) | **Custom mode only.** Rotate the media around its own center (e.g. `45`, `-90`, `180`). **Use string format for ranges:** `"0~360"`. |
 | `duration` | any number > 0 (seconds) | How long to show (images). Videos ignore it. |
 | `image_display_seconds` | any number > 0 (seconds) | Override for the global `image_display_seconds` (images only). Takes priority over `duration`. |
-| `fade_seconds` | any number >= 0 (seconds) | Override for the global `fade_seconds` — how long the fade-out lasts. Image-only; ignored by videos. |
+| `fade_out_seconds` | any number >= 0 (seconds) | Override for the global `fade_out_seconds` — how long the fade-out lasts. Image-only; ignored by videos. The old name `fade_seconds` is accepted as a deprecated alias (a warning asks you to rename it). |
+| `fade_in_seconds` | any number >= 0 (seconds, default `0`) | Override for the global `fade_in_seconds` — the image/GIF fades in from transparent **before** the display clock starts, so total lifetime = fade_in + display + fade_out. `0` = appears instantly. Image/GIF-only; ignored by videos. |
 | `volume` | 0.0 – 1.0 | Volume for that file (multiplied with global `audio_volume`). |
+| `speed` | any number > 0 (default `1`) | Playback speed multiplier for this file: video + its audio, GIFs, sidecar audio, **and** image display time + fades (all timings scale by 1/speed). `2` = twice as fast, `0.5` = half. With `pitch=1` the audio speeds up tape-style (pitch rises with speed); with `pitch != 1` speed and pitch are independent (audio is re-encoded via ffmpeg). **Use string format for ranges:** `"1.0~2.0"`. |
+| `pitch` | any number > 0 (default `1`) | Audio pitch multiplier for this file: sidecar audio and the audio of videos (the embedded track is extracted + re-encoded). `2` = an octave up, `0.5` = an octave down. Requires ffmpeg; independent of `speed`. **Use string format for ranges:** `"0.5~1.5"`. |
+| `speed_pitch` | any number >= 0 (default `0` = off) | Sets **both** speed and pitch at once (`speed = pitch = this value`, e.g. `1.5` = 1.5× speed AND 1.5× pitch). When set (per-file > global) it **overrides** the individual `speed`/`pitch` values — handy for randomizing both together later. `0`/absent = use `speed` and `pitch` separately. **Use string format for ranges:** `"1.0~2.0"`. |
+| `max_duration` | any number >= 0 (seconds, default `0`) | Hard cap for this file. When the timer runs out, the video/image/gif **and** its sidecar audio stop **immediately** and the overlay closes **instantly — no fade-out**. `0` = no cap (play naturally). Setting it smaller than `image_display_seconds` truncates the image display; smaller than a video's length cuts the video off early. Per-file wins over the global `max_duration` — use `0` per-file to disable a global cap for one file. **Use string format for ranges:** `"1.0~5.0"`. |
 
-`duration`, `image_display_seconds`, and `fade_seconds` are **image-only** —
+`duration`, `image_display_seconds`, and `fade_out_seconds` are **image-only** —
 when attached to a video they are silently ignored (videos play to end and use
-the global `fade_seconds` for their fade-out).
+the global `fade_out_seconds` for their fade-out).
 
 Anything invalid is dropped with a logged warning — it never breaks the app.
 
 > **Tip:** the demo file `media/images/test_scare.json` shows an example
-> (cover, 3s, volume 0.7). Delete or edit it to see the effect.
+> (cover-height, 3s, volume 0.7). Delete or edit it to see the effect.
 
 ### 3. `video-urls.txt` (downloader input)
 
@@ -157,13 +181,32 @@ When an overlay triggers (a roll succeeds, or you use `--test` / `--play`):
    - **no window chrome** (frameless), **no taskbar button / Alt-Tab entry**
      (`Qt.Tool`), **always on top**, **never steals focus**, and
      **click-through** (clicks pass to whatever is underneath).
-2. Media is drawn **fitted** to the screen (aspect preserved, centered) unless
-   the file's sidecar sets `mode` to `cover` or `stretch`.
+2. Media is drawn per the **`mode`** setting — `fit` (whole media visible,
+   aspect kept, centered) by default. Set a global default in `config.json`
+   (`"mode": "cover-height"`) or per-file in the sidecar. Options: `stretch`
+   (squish to screen size), `cover-height` (fit the entire screen horizontally
+   — crop top/bottom when the media is taller than the screen),
+   `cover-width` (fit the entire screen vertically — crop left/right when the
+   media is wider), `fit` (no stretching), and `custom` — position the media
+   anywhere with `position_x/position_y` (0..1 edge-pinning), stretch it
+   independently with `scale_x/scale_y` (relative to the fit size),
+   mirror it with `flip_h/flip_v`, and rotate it with `rotation` (degrees
+   around its center). The custom values only apply when `mode` is `custom`.
 3. **Images:** shown for `image_display_seconds` (or sidecar `duration`),
-   then fade out over `fade_seconds` (the window opacity animates 1→0 while
-   any sidecar audio keeps playing).
+   then fade out over `fade_out_seconds` (the window opacity animates 1→0 while
+   any sidecar audio keeps playing). With `fade_in_seconds` set, the image
+   first fades in from transparent (opacity 0→1) **before** the display clock
+   starts — total lifetime = fade_in + display + fade_out. With `speed` (or
+   `speed_pitch`) set, the display time and both fades scale — divided by
+   speed (2× speed = half the display + fade times).
 4. **Videos:** played to the end via QtMultimedia (audio + modern codecs),
-   then fade out over `fade_seconds` (window opacity 1→0).
+   then fade out over `fade_out_seconds` (window opacity 1→0).
+
+**`max_duration`** caps any overlay: once the timer runs out, the visual
+(image/gif/video) **and any audio** (sidecar, extracted, or embedded) stop
+immediately and the overlay closes **instantly with no fade-out** — the
+media simply vanishes. With `0` the overlay plays to its natural end
+(image timer / video length, with the normal fade behavior).
 
 **Audio lifetime — a single overlay:** when the visual content finishes
 (its display time for images, or end-of-media for videos) it begins to fade
