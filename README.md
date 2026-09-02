@@ -1,12 +1,7 @@
 # DYST (did you see that? 👀)
 
-A Windows background app — at random intervals it plays a
-fullscreen image or video on top of whatever you're doing, then disappears.
+A Windows background app — at random intervals it plays an image or video on top of whatever you're doing, then disappears.
 No window, no taskbar icon, no focus steal; it overlays directly on the screen.
-
-> **Status:** early prototype (Phase 1). Media plays on screen, ticker runs,
-> per-file settings + highest-quality downloads work. Chroma key, tray icon,
-> audio sidecars and more are still to come (see PROGRESS.md).
 
 ---
 
