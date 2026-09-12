@@ -283,6 +283,77 @@ def main() -> int:
     assert r({"speed": 1.5, "pitch": 0.5}, {"speed": 1.0, "pitch": 1.0}) == (1.5, 0.5)
     print("PASS speed_pitch overrides speed/pitch (per-file > global)")
 
+    # 3l. scale (morestufftoadd feature): the uniform `scale` key sets BOTH
+    # scale_x and scale_y; it is overwritten when BOTH `scale_x` and `scale_y`
+    # are given explicitly (a lone per-axis key overrides just its own axis).
+    r = main_mod.resolve_scale
+    assert r({"scale": 2.0}, {}) == (2.0, 2.0), r({"scale": 2.0}, {})
+    assert r({"scale": 2.0, "scale_x": 3.0}, {}) == (3.0, 2.0)
+    assert r({"scale": 2.0, "scale_x": 3.0, "scale_y": 4.0}, {}) == (3.0, 4.0)
+    assert r({}, {"scale_x": 1.5, "scale_y": 1.0}) == (1.5, 1.0)
+    assert r({}, {}) == (1.0, 1.0)
+    # range randomization (min~max): resolves inside the requested bounds
+    # AND gives BOTH axes the SAME random value (uniform scale = one draw).
+    import random as _random
+    _random.seed(7)
+    rx, ry = r({"scale": "0.5~1.5"}, {})
+    assert 0.5 <= rx <= 1.5 and 0.5 <= ry <= 1.5, (rx, ry)
+    assert rx == ry, f"uniform scale must share one draw, got {rx} != {ry}"
+    # per-file settings parsing keeps `scale` (number and range), drops bad values
+    vs = media._validate_settings
+    assert vs("s.json", {"scale": 2.0})["scale"] == 2.0
+    assert vs("s.json", {"scale": "0.5~1.5"})["scale"] == (0.5, 1.5)
+    assert "scale" not in vs("s.json", {"scale": -1})
+    print("PASS scale: uniform key sets both axes, overwritten when scale_x+scale_y given")
+
+    # 3m. weights (morestufftoadd feature): per-file `weight` changes the pick
+    # probability. 3 items, one with weight 2 -> 2/4 = 50%, the other two
+    # 1/4 = 25% each (default weight = 1).
+    import random as _random
+    pool = [
+        media.MediaItem("a.png", "image", {"weight": 2.0}),
+        media.MediaItem("b.png", "image", {}),
+        media.MediaItem("c.png", "image", {}),
+    ]
+    _random.seed(12345)
+    N = 20000
+    counts = {"a": 0, "b": 0, "c": 0}
+    for _ in range(N):
+        item = media.pick_from(pool)
+        counts[item.path[0]] += 1
+    pa, pb = counts["a"] / N, counts["b"] / N
+    assert abs(pa - 0.5) < 0.02, f"weight-2 item expected ~50%, got {pa:.3f}"
+    assert abs(pb - 0.25) < 0.02, f"default item expected ~25%, got {pb:.3f}"
+    # All-default pool still picks uniformly.
+    _random.seed(999)
+    pool2 = [media.MediaItem("a.png", "image", {}),
+             media.MediaItem("b.png", "image", {})]
+    counts2 = {"a": 0, "b": 0}
+    for _ in range(4000):
+        item = media.pick_from(pool2)
+        counts2[item.path[0]] += 1
+    assert abs(counts2["a"] / 4000 - 0.5) < 0.03
+    # Parsing: valid weights kept (floats AND 0), invalid dropped with a warning.
+    vs = media._validate_settings
+    assert vs("w.json", {"weight": 0.0})["weight"] == 0.0       # 0 allowed = never picked
+    assert vs("w.json", {"weight": 2.5})["weight"] == 2.5      # floats allowed
+    assert "weight" not in vs("w.json", {"weight": -1})         # negative dropped
+    assert "weight" not in vs("w.json", {"weight": "abc"})
+    # A weight-0 item is never picked while the others keep their odds.
+    _random.seed(42)
+    pool3 = [
+        media.MediaItem("a.png", "image", {"weight": 1.0}),
+        media.MediaItem("zero.png", "image", {"weight": 0.0}),
+    ]
+    for _ in range(3000):
+        item = media.pick_from(pool3)
+        assert item.path != "zero.png", "weight-0 item must never be picked"
+    # An all-zero pool picks nothing (None + warning), e.g. scriptable mute.
+    pool4 = [media.MediaItem("a.png", "image", {"weight": 0.0}),
+             media.MediaItem("b.png", "image", {"weight": 0.0})]
+    assert media.pick_from(pool4) is None
+    print("PASS weights: weighted pick ~2:1:1, default-uniform, 0=never+warning, all-zero=None")
+
     # 3i. max_duration x speed race: max firing mid-fade must not close the
     # overlay twice (natural end starts a fade; max force-closes instantly).
     w = OverlayWindow()

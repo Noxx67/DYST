@@ -28,6 +28,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtWidgets import QApplication, QWidget
 
 from dyst import ffmpeg_util
+from dyst import chroma as chroma_mod
 
 log = logging.getLogger("dyst.overlay")
 
@@ -79,6 +80,9 @@ class OverlayWindow(QWidget):
         self._visual_done = False   # True once the visual media has finished playing/displaying
         self._closing = False       # True once close teardown has begun (one-shot guard)
         self._audio_done = False   # True once all audio has finished (or there is no audio player)
+        self._audio_started = False  # True once an audio player actually reached PlayingState
+        self._video_clock_pending = False  # video timer deferred until the audio clock starts
+        self._video_clock_fallback = None  # QTimer: force-start the video clock if audio never starts
         self._fade_started = False  # True once the fade-out animation has begun
         self._fade_done = False     # True once the fade-out animation has completed
 
@@ -120,6 +124,8 @@ class OverlayWindow(QWidget):
              fade_out_seconds: float = 0.2, volume: float = 1.0,
              mode: str = "fit", sidecar_audio: str | None = None,
              custom: dict | None = None,
+             chroma: dict | None = None,
+             cached: dict | None = None,
              max_duration: float = 0.0,
              speed: float = 1.0, pitch: float = 1.0,
              fade_in_seconds: float = 0.0,
@@ -139,6 +145,10 @@ class OverlayWindow(QWidget):
               whole media visible), flip_h/flip_v (bool), rotation (degrees).
               Missing keys keep sane defaults; values are clamped
               defensively here too.
+        chroma: validated chroma_key config dict (ranges + despill) to
+              green/blue-screen the media at load/frame time; None (or
+              disabled via should_apply) = no filtering. Applies to images,
+              GIF frames and every OpenCV-decoded video frame.
         max_duration: hard cap in seconds (0 = disabled). When it runs out,
               the video/image/gif AND any audio (sidecar / extracted /
               embedded) stop immediately and the overlay closes instantly —
@@ -163,6 +173,15 @@ class OverlayWindow(QWidget):
         self._volume = max(0.0, min(1.0, volume))
         self._mode = mode if mode in ("fit", "cover-height", "cover-width", "stretch", "custom") else "fit"
         self._apply_custom(custom or {})
+        # Chroma key (green/blue screen removal): None = off; else the
+        # validated chroma_key dict (ranges + despill). Caller decides
+        # whether it applies (enabled / exceptions / per-file override).
+        self._chroma_params = chroma
+        # Pre-processed chroma cache (from dyst.precache): {dir, masks, meta}.
+        # When set, video frames are NOT keyed live — the cached per-frame
+        # alpha masks are applied instead (~2-5 ms vs ~50-60 ms per frame).
+        self._cached_masks = cached["masks"] if cached else None
+        self._cached_meta = cached.get("meta") if cached else None
         self._max_duration = max(0.0, self._resolve(max_duration))
         self._speed = max(0.05, self._resolve(speed))
         self._pitch = max(0.05, self._resolve(pitch))
@@ -204,6 +223,9 @@ class OverlayWindow(QWidget):
                             for i in range(im.n_frames):
                                 im.seek(i)
                                 frame = im.convert("RGBA")
+                                if self._chroma_params is not None:
+                                    frame = chroma_mod.chroma_key_image(
+                                        frame, self._chroma_params)
                                 arr = np.array(frame)
                                 h, w = arr.shape[:2]
 
@@ -245,10 +267,13 @@ class OverlayWindow(QWidget):
                 return True
 
 
-        if kind in ("video", "video-qt", "video-av1"):
+        if kind in ("video", "video-qt", "video-av1", "video-chroma", "video-chroma-cached"):
             if kind == "video-qt":
                 return self._load_video_qt(path)
-            if kind == "video-av1":
+            if kind in ("video-av1", "video-chroma", "video-chroma-cached"):
+                # OpenCV software frames (chroma applied in _paint_frame —
+                # live keying or pre-cached alpha masks) + sidecar-or-
+                # extracted audio.
                 return self._load_video_av1(path)
             return self._load_video_cv(path)
 
@@ -344,11 +369,46 @@ class OverlayWindow(QWidget):
                 self._player.play()
             if self._audio_player is not None:
                 self._audio_player.play()  # sidecar
-        else:  # "video" / "video-av1"
+        else:  # "video" / "video-av1" / "video-chroma" / "video-chroma-cached"
             if self._cap is not None:
-                self._video_timer.start()
-                if self._kind == "video-av1" and self._audio_player is not None:
-                    self._audio_player.play()
+                if self._audio_player is not None and self._kind != "video":
+                    # AUDIO-FIRST START: QMediaPlayer has startup latency
+                    # (media warm-up + Windows audio session setup). If the
+                    # frame timer ran freely meanwhile, the video would run
+                    # AHEAD of the audio clock — and the sync loop only
+                    # corrects being behind, so the visuals (and their alpha
+                    # masks) would permanently lead the audio ("masking out
+                    # of sync, audio delayed"). The video clock therefore
+                    # starts only once the audio ACTUALLY reaches
+                    # PlayingState; the fallback timer covers the never-
+                    # starts case. The first catch-up tick then decodes
+                    # straight to the audio position — perfectly in sync.
+                    self._video_clock_pending = True
+                    self._video_clock_fallback = QTimer(self)
+                    self._video_clock_fallback.setSingleShot(True)
+                    self._video_clock_fallback.timeout.connect(self._start_video_clock)
+                    self._video_clock_fallback.start(2000)
+                else:
+                    self._video_timer.start()
+            if self._audio_player is not None:
+                self._audio_player.play()
+
+    def _start_video_clock(self) -> None:
+        """Start the OpenCV frame timer (deferred until the audio clock runs).
+        Also called as the fallback when the audio never reaches PlayingState."""
+        self._video_clock_pending = False
+        if self._video_clock_fallback is not None:
+            self._video_clock_fallback.stop()
+            self._video_clock_fallback.deleteLater()
+            self._video_clock_fallback = None
+        if self._closing or self._cap is None or self._video_timer.isActive():
+            return
+        if (self._audio_player is not None and not self._audio_started
+                and self._audio_player.playbackState()
+                    != QMediaPlayer.PlaybackState.PlayingState):
+            log.warning("overlay: audio never started — running the video "
+                        "clock alone for %s", self._path)
+        self._video_timer.start()
 
     # -- internals --------------------------------------------------------
 
@@ -370,7 +430,7 @@ class OverlayWindow(QWidget):
             # Speed multiplier: interval = base / speed (faster = shorter).
             self._video_timer.setInterval(max(1, int(1000.0 / (self._fps * self._speed))))
         self._frame_index = 0  # frame 0 already consumed above
-        self._current = self._frame_to_qimage(frame)
+        self._current = self._paint_frame(frame)
         return True
 
     def _create_audio_player(self, path: str) -> None:
@@ -385,6 +445,7 @@ class OverlayWindow(QWidget):
         player.setAudioOutput(audio_out)
         player.setSource(QUrl.fromLocalFile(src))
         player.mediaStatusChanged.connect(self._audio_end)
+        player.playbackStateChanged.connect(self._on_audio_playback_state)
         self._audio_player = player
 
     def _prepare_audio_file(self, path: str) -> str:
@@ -476,6 +537,18 @@ class OverlayWindow(QWidget):
             # any other status - keep playing unless explicitly errored
             pass
 
+    def _on_audio_playback_state(self, state) -> None:
+        """Record that the audio player actually started playing. Used by
+        _close_if_ready as a safety net: a player that NEVER reached
+        PlayingState (e.g. the media failed to load) would otherwise hold
+        the overlay open forever."""
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._audio_started = True
+            # The audio clock is now running — release the deferred video
+            # clock (audio-first start for the OpenCV-synced kinds).
+            if self._video_clock_pending:
+                self._start_video_clock()
+
     def _audio_end(self, status) -> None:
         """Callback for the sidecar / extracted audio player (mediaStatusChanged)."""
         ended = (status == QMediaPlayer.MediaStatus.EndOfMedia or
@@ -483,6 +556,15 @@ class OverlayWindow(QWidget):
         if ended:
             self._audio_done = True
             self._audio_player = None  # finished/errored - nothing left to wait for
+            # The extracted EMBEDDED track is the media's own audio clock for
+            # the OpenCV-decoded video kinds. When IT ends, the media is over
+            # (locked decision: videos end instantly at media end) — finish
+            # the visual right away instead of grinding through the remaining
+            # frames at keying speed. Sidecar audio is NOT the media's end
+            # (it may outlive the video), so it doesn't trigger this.
+            if (self._temp_audio is not None and self._cap is not None
+                    and self._kind in ("video-av1", "video-chroma", "video-chroma-cached")):
+                self._on_visual_finished()
         self._close_if_ready()
 
     def _on_visual_finished(self) -> None:
@@ -554,6 +636,19 @@ class OverlayWindow(QWidget):
         running), wait for it to finish first."""
         if self._audio_done and self._visual_done and self._fade_done:
             self._finish_close()
+        elif (self._visual_done and self._fade_done
+                and self._audio_player is not None
+                and not self._audio_started
+                and self._audio_player.playbackState()
+                    != QMediaPlayer.PlaybackState.PlayingState):
+            # Safety net: the visual is fully done but the audio player never
+            # started playing (load failure / silent decode error). Treat the
+            # audio as finished instead of hanging the overlay open forever.
+            log.warning("overlay: audio player never started for %s - closing anyway", self._path)
+            self._audio_player.stop()
+            self._audio_player = None
+            self._audio_done = True
+            self._finish_close()
 
     def _advance_gif_frame(self) -> None:
         if not self._gif_frames or not hasattr(self, "_gif_durations"):
@@ -578,6 +673,8 @@ class OverlayWindow(QWidget):
     def _load_image(self, path: str) -> QImage | None:
         try:
             img = Image.open(path).convert("RGBA")
+            if self._chroma_params is not None:
+                img = chroma_mod.chroma_key_image(img, self._chroma_params)
         except Exception as exc:  # Pillow raises several error types
             log.error("overlay: cannot load image %s (%s)", path, exc)
             return None
@@ -586,15 +683,40 @@ class OverlayWindow(QWidget):
         # .copy() so the QImage owns its buffer (numpy memory is reused).
         return QImage(arr.data, w, h, arr.strides[0], QImage.Format_RGBA8888).copy()
 
-    def _frame_to_qimage(self, bgr) -> QImage:
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    def _frame_to_qimage(self, frame) -> QImage:
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            # BGRA (chroma keyed) -> RGBA with alpha.
+            rgba = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
+            h, w = rgba.shape[:2]
+            return QImage(rgba.data, w, h, rgba.strides[0], QImage.Format_RGBA8888).copy()
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w = rgb.shape[:2]
         return QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
+
+    def _paint_frame(self, frame) -> QImage:
+        """Alpha-application for a BGR/BGRA frame -> QImage.
+
+        With a pre-processing cache (video-chroma-cached) the cached per-frame
+        alpha mask is applied instead of live chroma keying — the expensive
+        mask math was already done once by dyst.precache. Optional despill is
+        still applied at playback (it is pixel work, not mask work).
+        """
+        if self._cached_masks is not None:
+            out = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
+            idx = min(max(0, self._frame_index), len(self._cached_masks) - 1)
+            out[:, :, 3] = self._cached_masks[idx]
+            if self._chroma_params is not None and self._chroma_params.get("despill"):
+                chroma_mod._despill(out)
+            return self._frame_to_qimage(out)
+        if self._chroma_params is not None:
+            frame = chroma_mod.chroma_key_frame(frame, self._chroma_params)
+        return self._frame_to_qimage(frame)
 
     def _next_frame(self) -> None:
         if self._cap is None:
             return
-        if (self._kind == "video-av1" and self._audio_player is not None
+        if (self._kind in ("video-av1", "video-chroma", "video-chroma-cached")
+                and self._audio_player is not None
                 and self._audio_player.playbackState()
                 == QMediaPlayer.PlaybackState.PlayingState):
             # AV1 sync WITHOUT per-frame seeks (those re-decode from the
@@ -604,26 +726,31 @@ class OverlayWindow(QWidget):
             # Audio is baked to tempo speed, so position already advances at
             # speed x wall-clock; frame index target stays position*fps/1000.
             target = int(self._audio_player.position() * self._fps / 1000.0)
-            if target > self._frame_index:
-                # We're behind the audio: advance / drop frames to catch up.
-                while self._frame_index < target:
-                    ok, frame = self._cap.read()
-                    if not ok:
-                        self._video_timer.stop()
-                        self._on_visual_finished()
-                        return
-                    self._frame_index += 1
-                    self._current = self._frame_to_qimage(frame)
-                self.update()
-            # else: ahead or exactly on time -> keep showing the current frame
-            # (the timer naturally paces us; no read, no seek).
-            return
+            # CHEAP CATCH-UP: chroma keying (~50ms/frame at 720p) must NOT be
+            # applied to frames we're skipping — the audio clock advances at
+            # the video's real fps (e.g. 60), which keying can never keep up
+            # with. Raw-decode skipped frames (no keying, no QImage convert)
+            # and only chroma-key + display the frame we actually land on.
+            # Cap decodes per tick so one tick can never block the GUI for
+            # seconds (that starved the media pipeline and made playback
+            # crawl); whatever is left continues on the next tick.
+            target = min(target, self._frame_index + 30)
+            while self._frame_index < target:
+                ok, frame = self._cap.read()
+                if not ok:
+                    self._video_timer.stop()
+                    self._on_visual_finished()
+                    return
+                self._frame_index += 1
+                if self._frame_index >= target:
+                    self._current = self._paint_frame(frame)
+            self.update()
         ok, frame = self._cap.read()
         if not ok:
             self._video_timer.stop()
             self._on_visual_finished()
             return
-        self._current = self._frame_to_qimage(frame)
+        self._current = self._paint_frame(frame)
         self.update()
 
     def _start_fade(self) -> None:
@@ -678,6 +805,11 @@ class OverlayWindow(QWidget):
             self._max_timer.stop()
             self._max_timer.deleteLater()
             self._max_timer = None
+        if self._video_clock_fallback is not None:
+            self._video_clock_fallback.stop()
+            self._video_clock_fallback.deleteLater()
+            self._video_clock_fallback = None
+        self._video_clock_pending = False
         self._gif_frames = []
         self._gif_frame_index = 0
         for tmp in self._temp_files:

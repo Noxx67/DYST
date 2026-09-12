@@ -65,3 +65,4 @@ PROGRESS.md
 .pytest_cache/
 .coverage
 htmlcov/
+.cache/

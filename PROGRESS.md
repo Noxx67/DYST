@@ -10,9 +10,9 @@ Overall progress tracker. Single source of truth for what has been done and test
 - **Current phase:** Phase 1a (playback spike) ✅ DONE & VERIFIED — media now plays on top
 - **Also done:** Phase 1 core ticker (roll + burst) ✅ verified
 - **Additional fixes:** ticker config bugs (`_roll_once` missing, `max_concurrent` parser) resolved; Qt Multimedia video overlay error `LoadFailed` enum fix; video playback no longer crashes with AttributeError.
-- **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ (tray wiring pending Phase 6)
+- **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ (tray wiring pending Phase 6) · **Phase 3 (chroma key) ✅ DONE & VERIFIED**
 - **Packaging:** PyInstaller build ✅ DONE & VERIFIED (Phase 7 partial — see report below)
-- **Last updated:** PyInstaller packaging (Phase 7 partial)
+- **Last updated:** Phase 3 chroma key (implementation finished + verified; incl. preset-inert fix & --play cleanup)
 
 ---
 
@@ -24,7 +24,7 @@ Overall progress tracker. Single source of truth for what has been done and test
 | 1a | Playback spike (minimal overlay + media + CLI) | ✅ verified | + FPS-synced OpenCV path; video-qt (QtMultimedia, audio+AV1) added |
 | 1 | Core loop (ticker) | ✅ verified | minimal spec ticker done (roll + burst); tray/daemon wiring in P6 |
 | 2 | Media scanning & pairing | ✅ done | validation, sidecar audio, per-file settings |
-| 3 | Chroma key module | ⬜ not started | |
+| 3 | Chroma key module | ✅ verified | HSV mask + feathered alpha (images/GIFs/video frames); presets; per-file override; `video-chroma` routing |
 | 4 | Overlay window polish | ⬜ not started | monitor selection, animation (GIF/APNG) |
 | 5 | Manager & audio | ⬜ not started | global concurrency, audio/sidecar |
 | 6 | Tray + autostart | ⬜ not started | |
@@ -626,7 +626,137 @@ image config reads `image_display_seconds`, `fade_in_seconds`,
   mapped to `fade_out_seconds`, mammoth migrated), CLI `--play` with the new
   key exits 0.
 
-## Environment notes
+### 1i — uniform `scale` key (morestufftoadd feature) ✅ DONE & VERIFIED
+
+Feature request (morestufftoadd.txt: "normal scale value instead of scale x
+and scale y as a parameter"): a single per-file `scale` key that scales the
+media in BOTH directions at once.
+
+- **Semantics (per user request):** `scale` sets BOTH `scale_x` and `scale_y`
+  to the same value (`"scale": 2` = twice as wide AND twice as tall). It is
+  **overwritten when BOTH `scale_x` AND `scale_y` are given explicitly** in
+  the sidecar (then the per-axis values are used as-is); a lone `scale_x`/
+  `scale_y` overrides just its own axis (the uniform `scale` fills the
+  other). Without any per-file scale key the global `scale_x`/`scale_y`
+  config behaves exactly as before. Ranges ("0.5~1.5") are supported for
+  randomization, like the other numeric keys.
+- **Custom-mode only**, like the other layout keys — ignored unless
+  `mode` is `custom`.
+- **Files touched:** `dyst/media.py` (`scale` parsing in
+  `_validate_settings` + `RANDOM_KEYS`), `main.py` (new `resolve_scale`
+  helper + used in `_spawn_overlay`; `scale` added to the `--play` sidecar
+  merge list), `media/images/woolly-mammoth.json` (hint), README/AGENTS
+  docs, `scripts/test_phase1.py` (new 3l check), PROGRESS.md.
+- **Verified:** py_compile clean; test_phase0 green; test_phase1 (offscreen)
+  green incl. the new scale check — `resolve_scale` matrix (scale-only →
+  (2,2); scale + lone scale_x → (3,2); scale_x+scale_y both given → (3,4)
+  overwriting scale; no per-file → global; defaults (1,1); ranges resolve
+  inside bounds with ONE shared draw for both axes — X always equals Y;
+  sidecar parsing keeps number + range values and drops
+  bad ones (`scale: -1` rejected with warning).
+
+### 1j — per-media `weight` (morestufftoadd feature) ✅ DONE & VERIFIED
+
+Feature request: "adding weights parameter for per media config to alter the
+chances of the media being picked — weight 2 means twice as likely to be
+picked than weight 1 media."
+
+- **Semantics (as requested):** `weight` (default `1`, >= 0; floats allowed) in
+  a per-file sidecar changes how likely that media is chosen by the random
+  trigger. The pick chance is `weight / total_weight` across the whole pool
+  — e.g. 3 files, one with `weight: 2` → that one gets 2/4 = 50%, the
+  other two 1/4 = 25% each. **`0` = never picked** (a warning is logged:
+  "…will NOT show (never picked)"); if EVERY weight is 0, `pick_from`
+  returns None and nothing is picked. Works in ANY `mode` (not custom-only).
+- **Implementation:** `dyst/media.py` `_validate_settings` now parses
+  `weight` (any float >= 0; negative/"abc" dropped with a warning; NOT
+  range-randomizable); `pick_from()` does a weighted `random.choices`
+  (per-item `settings["weight"]`, 0-weight items are never selected;
+  uniform fallback when nothing sets a weight; None + warning for an
+  all-zero pool). Because the ticker's picker, `--test`, and daemon all
+  go through `pick_from`, weighting applies everywhere automatically.
+- **Files touched:** `dyst/media.py` (weight parse + weighted `pick_from`),
+  `main.py` (`--play` merge tuple), `media/images/woolly-mammoth.json`
+  (`weight: 2` + hint — demo sidecar mirror per AGENTS.md §12.4), README
+  (settings table row), AGENTS.md (§2 table + §9 bullet), PROGRESS.md,
+  `scripts/test_phase1.py` (new 3m check).
+- **Verified:** py_compile clean; test_phase0 green; test_phase1 (offscreen)
+  green incl. the new weights check — seeded 20k picks of a 2/1/1 pool give
+  ~50%/25%/25% (±2%); all-default pool stays uniform; parsing keeps floats
+  (`2.5`) and `0` (with the "will NOT show" warning), drops negative and
+  `"abc"`; a weight-0 item is never picked over 3000 tries; an all-zero
+  pool returns None; real-scan check: woolly-mammoth (weight 2) picked
+  66.8% vs a weight-1 file (expected 66.7%).
+
+### 1k — chroma-key presets (user request) ✅ DONE & VERIFIED
+
+User request: "presets as in if the given value to the chroma key config
+is 'green' 'weak green' 'strong green' ... and we can also have the same
+presets for the blue color. and if the user really wants to use another one
+then he can figure out how to use the chroma key config with the way it is."
+
+- **New `preset` key in the `chroma_key` block** (default `"green"` — the
+  same ranges as the old manual defaults, so backward compatible). Valid
+  names (case-insensitive, whitespace trimmed): `green`, `weak green`,
+  `strong green`, `blue`, `weak blue`, `strong blue`. Each fills in
+  hue/saturation/value ranges:
+  - green [35,85]/[40,255]/[40,255] (same as the existing defaults)
+  - weak green [28,92]/[20,255]/[30,255] (wider, lower floors — faint/
+    uneven/dim screens), strong green [42,78]/[60,255]/[50,255] (tighter,
+    high sat floor — vivid screens, less subject punch-out)
+  - blue [100,130]/[40,255]/[40,255] (OpenCV hue: blue ≈ 120), weak blue
+    [90,145]/[20,255]/[30,255], strong blue [105,130]/[60,255]/[50,255]
+- **Precedence:** preset fills the ranges as defaults; explicit
+  `hue_range`/`saturation_range`/`value_range` in the user config still
+  override per-key — a preset is a starting point. Unknown preset → warned
+  + ignored (defaults stay).
+- **Files touched:** `dyst/config.py` (`_CHROMA_PRESETS` table + `preset`
+  key in defaults + application in `_validate_chroma_key` before explicit
+  ranges), `config.json` (`"preset": ""`), README (schema comment +
+  presets table + how it works), AGENTS.md (§8 schema), PROGRESS.md,
+  `scripts/test_phase0.py` (new 5b preset checks).
+- **Verified:** py_compile clean; test_phase0 green incl. the preset checks
+  — all 6 presets map to the expected triples, "  BLUE " normalises to
+  `blue`, explicit `hue_range` overrides the preset while its other ranges
+  stay, `preset: "pink"` warns and falls back to the default preset
+  (`green`). Follow-up: `config.json` ships with `"preset": "green"` and
+  the code defaults now use `green` too (verified via live config load).
+  `main.py --roll` still exits 0.
+- **Note:** this only configures ranges — the chroma-key pipeline itself
+  (`dyst/chroma.py`) is still Phase 3, next.
+
+## Phase 3 — Chroma key (green/blue-screen removal) ✅ DONE & VERIFIED
+
+**Implemented:**
+- `dyst/chroma.py` — the pipeline (images + every video frame, one code path):
+  - `_screen_mask` — HSV `inRange` (hue/sat/val ranges) → 3×3 erode → 5×5 Gaussian blur → inverted as alpha.
+  - `chroma_key_frame(bgr, params) -> bgra` — per-frame keying (+ optional basic despill on edge pixels); >50 ms/frame logs a perf warning.
+  - `chroma_key_image(pil_rgba, params) -> pil_rgba` — existing alpha preserved (min of both alphas).
+  - `should_apply(path, chroma_cfg, settings)` — global `enabled` + `exceptions` (case-insensitive basenames) + per-file `chroma: false` override.
+- `dyst/overlay.py` — chroma param plumbed through `load(...)`; applied to GIF frames, static images, and every OpenCV-decoded frame (`_paint_frame` → BGRA→RGBA `QImage`).
+- `main.py::_spawn_overlay` — gating decided ONCE per spawn; keyed videos route to **`video-chroma`** (OpenCV frames + sidecar-or-ffmpeg-extracted audio — QtMultimedia can't be frame-keyed).
+- `dyst/config.py` — `chroma_key` block with named **presets** (`green` / `weak green` / `strong green` / `blue` / `weak blue` / `strong blue`) that fill the ranges; explicit ranges still override per-key.
+- `scripts/test_chroma.py` — Phase 3 verification suite (image/frame keying, should_apply gating, sidecar `chroma` parsing, offscreen overlay render check, `video-chroma` routing).
+
+**Finishing pass (this session — the "chroma config doesn't work" investigation):**
+1. **Preset was inert in the shipped `config.json`**: the file contained explicit `hue_range`/`saturation_range`/`value_range` **byte-identical to the `green` preset**, and per-key explicit ranges override the preset by design — so toggling `preset` (e.g. `"green"` ↔ `"weak green"`, as the user tried at 23:14→23:15 per app.log) had **zero effect**. Removed the three redundant ranges from `config.json` so the preset now actually controls the keying (explicit ranges remain supported for manual tuning).
+2. Removed leftover `[CONFIG]` debug prints from `main.py` that printed contradictory values (defaults vs loaded config) — they made the config look like it wasn't being honored.
+3. Fixed latent `NameError` in `main.py --play`: `_parse_txt_settings` was called but never imported (crashed any run with a `.txt` settings sidecar).
+4. Added a `chroma: ON/OFF (...)` debug log line in `_spawn_overlay` so the effective chroma decision is visible in `app.log`.
+5. Demo sidecar mirror (§12.4): `media/images/woolly-mammoth.json` now carries `"chroma": true` + a `_hints` entry.
+6. **BUG FIX (desktop hang + no audio for chroma videos):** `OverlayWindow.start()` only called `self._audio_player.play()` for kind `video-av1` — the new `video-chroma` kind went through the same loader (audio player created) but was **never started**. Result on the desktop: no audio, the AV1 audio-clock sync never engaged, and after the fade the overlay waited forever on an audio player that never reached EndOfMedia → **stuck overlay**. (Earlier offscreen checks printed `EXIT=0` from `grep`, not the app — the run was actually killed by the timeout.) Fix: `start()` now plays the audio player for both `video-av1` and `video-chroma`.
+7. **Safety net against permanent hangs:** audio players now track `_audio_started` (first `PlaybackState.PlayingState`). If the visual + fade are done but the audio player **never started** (e.g. load/decode failure), the overlay closes instead of hanging forever (warning logged).
+8. **BUG FIX (user follow-up: "audio/video plays very slow now"):** the AV1 audio-sync catch-up loop in `_next_frame` chroma-keyed **every** frame it decoded to catch up with the audio clock. Keying costs ~50–60 ms/frame at 720p but the clock advances at the video's real fps (60 → 16.7 ms/frame budget), so it could never catch up: each tick decoded+keyed a growing burst (GUI blocked for seconds), the backlog snowballed, and playback crawled. Before the audio fix the sync branch never engaged (player not playing), which is why it "played smoothly" back then. Fix: skipped frames are **raw-decoded only** (no keying/QImage) — only the frame actually displayed gets keyed — and decodes are capped at 30/tick so a tick can never block for long. Additionally, when the **extracted embedded audio** ends (`_audio_end`, only when `_temp_audio` is set and a capture is active — sidecar audio deliberately excluded since it may outlive the video), the visual finishes immediately per the locked "videos end instantly at media end" decision. Verified instrumented: loaded 0.24 s → EndOfMedia 2.16 s (media ~1.75 s at true speed) → overlay closed 2.18 s.
+
+**Verified (commands + results):**
+- `py_compile` clean (main.py, chroma/config/media/overlay).
+- `scripts/test_phase0.py` → all pass (incl. preset checks). `scripts/test_phase1.py` → all pass. `scripts/test_chroma.py` → **all 6 checks pass**.
+- Elephant file (`Z_Ik77To2T0.webm`, AV1 720p60): raw pipeline green→alpha works (frame 60/90 keep 23–30% opaque = elephants, background transparent; visually confirmed keyed PNGs are clean, shadows keyed out).
+- Preset knob now effective on the elephant (frame 90 opaque fraction): `green` 0.300 · `weak green` 0.293 · `strong green` 0.312.
+- Real command offscreen (subprocess, true exit code): `main.py --play <elephant .webm>` → **EXIT 0** (~4 s wall: 720p60 chroma keying at ~50 ms/frame drops frames; audio clock keeps sync). `scripts/test_phase1.py` + `scripts/test_chroma.py` green after the fixes.
+- Note: the clip's first ~0.5 s is all-green (fully keyed → invisible overlay) — that's the video's content, not a bug.
+
+**Limitations:** chroma quality depends on footage (uneven lighting/dark shadows leave speckles); CPU-keying 720p ≈ 50–60 ms/frame (perf warning threshold).
 
 - **Working dir:** `C:/Users/ahmed/Downloads/Pi/`
 - **Python:** system `python` (3.11+). Never use `python3`.
@@ -634,6 +764,49 @@ image config reads `image_display_seconds`, `fade_in_seconds`,
 - **Run app:** `.venv/Scripts/python main.py`
 - **Bash quirk:** use forward slashes in this agent's bash (`cd "C:/Users/ahmed/Downloads/Pi"`).
 - Do not commit `.venv/`, `__pycache__/`, `app.log`.
+
+## Phase 3b — Chroma pre-processing cache (lazy, per-trigger) ✅ DONE & VERIFIED
+
+**User request:** don't chroma-key videos live (too slow); when a trigger fires for a video, pause the ticker, preprocess it once, cache it, and reuse the cache on the next occurrence. `--play` preprocesses first, then plays. NOT up-front for the whole library — lazily per first pick.
+
+**Implemented:**
+- `dyst/precache.py` (new) — the cache layer:
+  - `cache_root()` — `.cache/precache/` beside the app (shared across daemon sessions).
+  - `cache_key(path, params)` — sha1 of (abs path, size, mtime) + chroma settings fingerprint (preset + ranges + despill) + cache version → automatic invalidation when the file OR the chroma config changes.
+  - `cache_ready(path, params)` — returns `{dir, masks, meta}` handle or None; `masks` is an `np.memmap` (uint8, N×H×W) so playback reads pages on demand instead of loading everything.
+  - `ensure(path, params, progress)` — blocking preprocess: decodes the video, computes `_screen_mask` per frame, streams masks to `masks.raw` (incremental write — no giant RAM copy, long clips OK), writes `meta.json`, atomic tmp-dir rename. Reuses a valid cache instantly (~1 ms).
+- `dyst/overlay.py`:
+  - new kind **`video-chroma-cached`** (`load(..., cached=)`): same AV1/dual-player pipeline as `video-chroma`, but `_paint_frame` applies the **cached per-frame alpha** (BGR→BGRA + alpha channel swap, ~2–5 ms) instead of live keying (~50–60 ms). Optional despill still applied at playback (pixel work, not mask work — feathering is already baked into the cached masks).
+  - `_audio_end` extended to the new kind (media ends at embedded-audio end).
+- `main.py`:
+  - `_spawn_overlay(config, item, pre=False)` — chroma videos play from cache when present; with `pre=True` (--play/--test) a missing cache is built synchronously first (progress logged). Cache-miss without `pre` (daemon path) falls back to live keying instead of blocking.
+  - daemon spawner: when a tick picks an **uncached** chroma video → `ticker.stop()` (chance loop PAUSED), preprocess on a worker thread (other overlays keep playing), then via a Qt signal (queued to the GUI thread): spawn the overlay(s) from cache, `ticker.start()` (resumed). Same-video parallel triggers are grouped into one job. **PySide6 GC gotcha found and fixed:** the completion-signal QObject must stay referenced from the GUI side (stored in the job entry) — the worker's reference dies right after `emit()`, otherwise the queued event is GC'd before delivery.
+  - cache-HIT debug log (kind, frames, duration).
+- README: "Chroma-key preprocessing cache (videos)" section.
+
+**Verified (commands + results):**
+- `py_compile` clean (main.py, precache.py, overlay.py).
+- Preprocess elephant: **2.3 s one-time** (105 frames), 96.8 MB cache; re-call = instant HIT (~1 ms).
+- Cached playback offscreen: overlay finishes at **2.21 s ≈ real media time** (was 3.2–3.9 s live-keyed), `_cached_masks` in use, audio at true speed.
+- CLI: `--play` run 1 = preprocess (2.3 s, progress logs) + play from cache, exit 0; run 2 = instant cache HIT + play, exit 0 (2.7 s incl. ffmpeg audio extraction + Qt startup).
+- Daemon (isolated media folder, odds=3/tick=2): log shows `chance loop PAUSED while elephant.webm is preprocessed (one-time)` → `cached 105 keyed frames` → `job finished callback (GUI thread)` → `chance loop resumed`. Cache invalidation covered by key (file mtime + settings fingerprint).
+- Suites: test_phase0, test_phase1 (incl. the regression this round exposed — see below), test_chroma all green.
+- **Regression fixed during this work:** an earlier edit had turned `OverlayWindow.start()`'s `else:` into `elif video-av1/chroma...`, which stopped the **plain `video` kind** from starting its frame timer (test_phase1's "video overlay never finished" caught it). Restored `else:` with the audio-start guard for the OpenCV kinds.
+
+**Files touched:** dyst/precache.py (new), dyst/overlay.py, main.py, README.md, PROGRESS.md.
+
+### 3b-2 — sync fixes after desktop feedback ("masking off / audio delayed") ✅ DONE & VERIFIED
+
+**User report:** with cache playback, the masking/content was out of sync with the media and the audio arrived late.
+
+**Diagnosis — audio-first START was missing:** the frame timer started at the same moment `audio_player.play()` was *called*, but QMediaPlayer has startup latency (media warm-up + Windows audio session setup ≈ 0.2–0.5 s). Until the audio reaches `PlayingState` the sync branch is inactive, so the (now fast, cached ~8 ms/frame) video **free-ran ahead** — and the sync loop only corrects being *behind* (it holds when ahead), so the visuals permanently led the audio: content/masks out of sync, sound "delayed".
+
+**Fix (`overlay.py`):**
+- **Deferred video clock (audio-first start):** for `video-av1`/`video-chroma`/`video-chroma-cached` with an audio player, `start()` does NOT start the frame timer; `_on_audio_playback_state` starts it the moment the audio actually reaches `PlayingState` (`_start_video_clock`). The first catch-up tick then decodes straight to the audio position — in sync from frame one.
+- **Fallback:** a 2 s single-shot timer force-starts the video clock alone (warning logged) if the audio never starts, so a broken audio path can't hide the video forever. Fallback timer is stopped/cleared in `_finish_close`.
+- **Within playback**, being "ahead" is impossible by construction (video only advances when `frame_index < target`, target = audio position × fps).
+
+**Verified (offscreen, instrumented):** video-vs-audio drift **max 0.9 frames (~15 ms at 60 fps), mean 0.4** across playback (was: unbounded run-ahead); overlay finishes at 2.15 s ≈ real media time. `test_phase1` + `test_chroma` green; `--play` exit 0.
 
 ## Known limitations
 
@@ -647,7 +820,7 @@ image config reads `image_display_seconds`, `fade_in_seconds`,
   Sidecar audio (Phase 2) will restore sound for AV1 files.
 - `main.py --play <AV1 file>` on the real desktop is the best manual check for the
   video-qt path (offscreen QMediaPlayer isn't a reliable harness for it).
-- **No chroma key yet** (Phase 3) — the green-bg test video plays as a green rectangle for now.
+- **Chroma key works** (Phase 3 ✅) — keying quality depends on the footage: even lighting, no green on the subject, and non-green shadows. Dark/uneven green may leave speckles; tune `preset`/ranges or add per-file `chroma: false`.
 - **No global `max_concurrent` enforcement in --daemon** (manager in Phase 5); ticker only
   caps the same-tick burst.
 - Edge case: `odds=1` + `max_concurrent=0` makes the same-tick burst infinite — avoid in

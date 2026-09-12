@@ -138,8 +138,32 @@ def scan(root: str) -> list[MediaItem]:
 
 
 def pick_from(pool: list[MediaItem]) -> MediaItem | None:
-    """Uniform random pick from an already-scanned pool."""
-    return random.choice(pool) if pool else None
+    """Random pick from an already-scanned pool, weighted by each item's
+    per-file `weight` setting (default 1.0 = normal chance; 2 = twice as
+    likely as a weight-1 item; floats allowed, e.g. 0.5 = half; 0 = never
+    picked). Chance = weight / total_weight across the pool.
+    Falls back to a uniform pick when nothing sets a weight; returns None
+    (with a warning) when every weight is 0 so nothing is picked.
+    """
+    if not pool:
+        return None
+    weights = []
+    all_default = True
+    for item in pool:
+        w = item.settings.get("weight", 1.0)
+        if w != 1.0:
+            all_default = False
+        try:
+            weights.append(max(0.0, float(w)))
+        except (TypeError, ValueError):
+            weights.append(1.0)
+    total = sum(weights)
+    if total <= 0:
+        log.warning("media: all weights are 0 — nothing will ever be picked")
+        return None
+    if all_default or total == len(weights):
+        return random.choice(pool)
+    return random.choices(pool, weights=weights, k=1)[0]
 
 
 def is_av1(path: str) -> bool:
@@ -227,6 +251,25 @@ def _validate_settings(path: str, raw: dict) -> dict:
                 log.warning("media: %s: volume must be 0..1", path)
         except (TypeError, ValueError):
             log.warning("media: %s: invalid volume %r", path, volume)
+    weight = raw.get("weight")
+    if weight is not None:
+        try:
+            w = float(weight)
+            if w < 0:
+                log.warning("media: %s: weight must be >= 0 (default 1 = normal chance)", path)
+            else:
+                out["weight"] = w
+                if w == 0:
+                    log.warning("media: %s: weight is 0 — this media will NOT show (never picked)", path)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid weight %r", path, weight)
+    chroma_ovr = raw.get("chroma")
+    if chroma_ovr is not None:
+        b = _parse_bool(chroma_ovr)
+        if isinstance(b, bool):
+            out["chroma"] = b  # per-file override of chroma key (global default on)
+        else:
+            log.warning("media: %s: invalid chroma %r (use true/false)", path, chroma_ovr)
     image_display = raw.get("image_display_seconds")
     if image_display is not None:
         try:
@@ -354,12 +397,16 @@ def _validate_settings(path: str, raw: dict) -> dict:
     #   off-screen right, so media can peek in / be cropped (e.g. 1.5).
     # scale_x/y: relative multipliers of the "fit" size (1,1 = whole media
     #     visible, aspect kept, nothing cropped), must be > 0.
+    # scale: uniform multiplier that sets BOTH scale_x and scale_y to the
+    #     same value (overwritten when BOTH scale_x and scale_y are given
+    #     explicitly; a lone scale_x/scale_y overrides just its own axis).
     # rotation: degrees, any number. flip_h / flip_v: booleans.
     for key, (valid, desc) in {
         "position_x": (lambda v: -1.0 <= v <= 2.0, "-1..2"),
         "position_y": (lambda v: -1.0 <= v <= 2.0, "-1..2"),
         "scale_x": (lambda v: v > 0, "> 0"),
         "scale_y": (lambda v: v > 0, "> 0"),
+        "scale": (lambda v: v > 0, "> 0"),
         "rotation": (lambda v: True, "a number"),
     }.items():
         val = raw.get(key)
@@ -401,7 +448,7 @@ def _validate_settings(path: str, raw: dict) -> dict:
     # (separator defaults to "~"). Single values are kept as-is.
     # Booleans can use "random" to randomize true/false.
     RANDOM_KEYS = (
-        "position_x", "position_y", "scale_x", "scale_y",
+        "position_x", "position_y", "scale_x", "scale_y", "scale",
         "rotation", "speed", "pitch", "speed_pitch",
         "image_display_seconds", "fade_in_seconds", "fade_out_seconds",
         "opacity", "max_duration", 

@@ -2,6 +2,8 @@
 
 Writes into the media folder:
   media/images/test_scare.png   - transparent PNG with a red square
+  media/images/test_green.png   - solid GREEN background + red square
+                                  (for the chroma-key test, Phase 3)
   media/videos/test_scare.mp4   - 1s, 320x180, solid GREEN background with a
                                   moving red square (green is for the later
                                   chroma-key test)
@@ -32,6 +34,16 @@ def make_image(path: str) -> None:
     print(f"wrote {path}")
 
 
+def make_green_image(path: str) -> None:
+    """Chroma-key test PNG: solid GREEN background + red square (no alpha)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    img = Image.new("RGBA", (W, H), (0, 255, 0, 255))
+    d = ImageDraw.Draw(img)
+    d.rectangle((100, 30, 220, 150), fill=(255, 0, 0, 255))
+    img.save(path)
+    print(f"wrote {path}")
+
+
 def make_video(path: str) -> bool:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -54,6 +66,7 @@ def make_video(path: str) -> bool:
 def main() -> int:
     root = sys.argv[1] if len(sys.argv) > 1 else "media"
     make_image(os.path.join(root, "images", "test_scare.png"))
+    make_green_image(os.path.join(root, "images", "test_green.png"))
     make_video(os.path.join(root, "videos", "test_scare.mp4"))
     print("done. Run: python main.py --test")
     return 0

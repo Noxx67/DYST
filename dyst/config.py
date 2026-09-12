@@ -62,6 +62,7 @@ DEFAULTS: Dict[str, Any] = {
     # Chroma key
     "chroma_key": {
         "enabled": True,
+        "preset": "green",      # named preset: "" | green | weak green | strong green | blue | weak blue | strong blue
         "exceptions": [],
         "hue_range": [35, 85],
         "saturation_range": [40, 255],
@@ -78,6 +79,45 @@ DEFAULTS: Dict[str, Any] = {
 
 # Per-key validators. Each returns True if the value is acceptable.
 _CHROMA_KEY_DEFAULTS = DEFAULTS["chroma_key"]
+
+# Named chroma-key presets: a `preset` string in the config fills in the
+# hue/saturation/value ranges (as defaults); explicit per-key ranges in the
+# user config still override them. Hue is OpenCV's 0..179 scale
+# (green ≈ 60, blue ≈ 120). "weak" = wider/fainter catch (uneven or dim
+# screens), "strong" = tighter, vivid screens with less risk of punching
+# out the subject.
+_CHROMA_PRESETS: Dict[str, Dict[str, Any]] = {
+    "green": {
+        "hue_range": [35, 85],
+        "saturation_range": [40, 255],
+        "value_range": [40, 255],
+    },
+    "weak green": {
+        "hue_range": [28, 92],
+        "saturation_range": [20, 255],
+        "value_range": [30, 255],
+    },
+    "strong green": {
+        "hue_range": [42, 78],
+        "saturation_range": [60, 255],
+        "value_range": [50, 255],
+    },
+    "blue": {
+        "hue_range": [100, 130],
+        "saturation_range": [40, 255],
+        "value_range": [40, 255],
+    },
+    "weak blue": {
+        "hue_range": [90, 145],
+        "saturation_range": [20, 255],
+        "value_range": [30, 255],
+    },
+    "strong blue": {
+        "hue_range": [105, 130],
+        "saturation_range": [60, 255],
+        "value_range": [50, 255],
+    },
+}
 
 
 def _is_num(v: Any) -> bool:
@@ -167,6 +207,27 @@ def _validate_chroma_key(value: Any) -> Dict[str, Any]:
         out["exceptions"] = (
             [e for e in exc if isinstance(e, str)] if isinstance(exc, list) else _CHROMA_KEY_DEFAULTS["exceptions"]
         )
+    except KeyError:
+        pass
+    # Named presets ("green" / "weak green" / "strong green" / "blue" /
+    # "weak blue" / "strong blue") fill in the ranges; explicit per-key
+    # ranges below still override them, so a preset is a starting point.
+    try:
+        preset = value["preset"]
+        if isinstance(preset, str):
+            name = preset.strip().lower()
+            if not name:
+                pass  # "" = manual ranges; nothing to apply
+            elif name in _CHROMA_PRESETS:
+                out["preset"] = name
+                p = _CHROMA_PRESETS[name]
+                out["hue_range"] = list(p["hue_range"])
+                out["saturation_range"] = list(p["saturation_range"])
+                out["value_range"] = list(p["value_range"])
+            else:
+                log.warning("config: unknown chroma_key preset %r (use: green, weak green, strong green, blue, weak blue, strong blue) — ignoring", preset)
+        else:
+            log.warning("config: chroma_key 'preset' must be a string — ignoring")
     except KeyError:
         pass
     try:

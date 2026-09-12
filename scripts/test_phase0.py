@@ -104,6 +104,38 @@ def main() -> int:
         assert c["chroma_key"] == cfg.DEFAULTS["chroma_key"], c
         print("PASS invalid values -> defaults")
 
+        # 5b. Chroma-key presets: named values fill in the ranges; explicit
+        # per-key ranges still override a preset; unknown presets ignored.
+        for name, (hr, sr, vr) in [
+            ("green", ([35, 85], [40, 255], [40, 255])),
+            ("weak green", ([28, 92], [20, 255], [30, 255])),
+            ("strong green", ([42, 78], [60, 255], [50, 255])),
+            ("blue", ([100, 130], [40, 255], [40, 255])),
+            ("weak blue", ([90, 145], [20, 255], [30, 255])),
+            ("strong blue", ([105, 130], [60, 255], [50, 255])),
+        ]:
+            c = cfg.load_config(_write(tmp, "preset.json", {"chroma_key": {"preset": name}}))
+            ck = c["chroma_key"]
+            assert ck["preset"] == name, ck
+            assert ck["hue_range"] == hr, (name, ck["hue_range"])
+            assert ck["saturation_range"] == sr, (name, ck["saturation_range"])
+            assert ck["value_range"] == vr, (name, ck["value_range"])
+        # case + whitespace insensitive
+        c = cfg.load_config(_write(tmp, "preset2.json", {"chroma_key": {"preset": "  BLUE "}}))
+        assert c["chroma_key"]["preset"] == "blue"
+        assert c["chroma_key"]["hue_range"] == [100, 130]
+        # explicit ranges override the preset per-key; other preset ranges stay
+        c = cfg.load_config(_write(tmp, "preset3.json",
+                                   {"chroma_key": {"preset": "green", "hue_range": [40, 80]}}))
+        ck = c["chroma_key"]
+        assert ck["preset"] == "green" and ck["hue_range"] == [40, 80]
+        assert ck["saturation_range"] == [40, 255]
+        # unknown preset -> warning + fall back to the default preset, no crash
+        c = cfg.load_config(_write(tmp, "preset4.json", {"chroma_key": {"preset": "pink"}}))
+        assert c["chroma_key"]["preset"] == cfg.DEFAULTS["chroma_key"]["preset"] == "green"
+        assert c["chroma_key"]["hue_range"] == [35, 85]
+        print("PASS chroma presets: green/weak/strong + blue, explicit ranges win, unknown ignored")
+
         # 6. save_config round-trip
         p = _write(tmp, "roundtrip.json", cfg.DEFAULTS)
         cfg.save_config(p, {**cfg.DEFAULTS, "odds": 7, "debug": True})

@@ -89,8 +89,9 @@ with a warning, never crash the app.
                                 // (scripts/download_videos.py reads this;
                                 //  CLI 3rd arg overrides)
 
-  "chroma_key": {               // green-screen removal (Phase 3, coming)
+  "chroma_key": {               // green-screen removal (Phase 3)
     "enabled": true,
+    "preset": "green",         // named preset: "" (manual) | green (default) | weak green | strong green | blue | weak blue | strong blue
     "exceptions": [],           // filenames that skip chroma key
     "hue_range": [35, 85],
     "saturation_range": [40, 255],
@@ -102,6 +103,19 @@ with a warning, never crash the app.
   "debug": false                // verbose logging to app.log
 }
 ```
+
+**Green-screen presets** — instead of hunting for HSV numbers, set a named preset:
+
+| `preset` | hue | saturation | value | Use for |
+|---|---|---|---|---|
+| `"green"` (default) | 35–85 | 40–255 | 40–255 | normal, well-lit green screens |
+| `"weak green"` | 28–92 | 20–255 | 30–255 | faint/uneven/dim green — wider catch |
+| `"strong green"` | 42–78 | 60–255 | 50–255 | vivid uniform green — less risk of punching holes in the subject |
+| `"blue"` | 100–130 | 40–255 | 40–255 | standard blue screens |
+| `"weak blue"` | 90–145 | 20–255 | 30–255 | faint/uneven blue — wider catch |
+| `"strong blue"` | 105–130 | 60–255 | 50–255 | vivid uniform blue — less risk of punching holes |
+
+A preset fills in the three ranges for you; any `hue_range` / `saturation_range` / `value_range` you also set explicitly **still override** it per-key. If you want something else entirely, leave `preset` empty (`""`) and set the ranges by hand. Case doesn't matter (`"GREEN"` works).
 
 ### 2. Per-file settings sidecar (overrides)
 
@@ -132,6 +146,7 @@ volume=0.8
 | `mode` | `fit` (default) · `stretch` · `cover-height` · `cover-width` · `custom` | How the media covers the screen (also set globally via the `mode` key in `config.json`; the sidecar wins). `fit` = whole media visible, aspect kept, centered · `stretch` = squished to exactly the screen size · `cover-height` = fit the entire screen **horizontally** · `cover-width` = fit the entire screen **vertically** · `custom` = use position/scale/flip/rotation below. The old `cover` value was removed — it falls back to `fit`. |
 | `position_x` / `position_y` | −1.0 – 2.0 (default `0.5`) | **Custom mode only.** Where the media sits. `0` pins the edge to the screen edge (`position_x=0` → left edge at screen left), `1` pins the other edge (`position_x=1` → right edge at screen right), `0.5` centers it. Same for Y (top/bottom). Values outside 0–1 push the media **off-screen** so it can peek in or be cropped at the screen edge: `-1` = fully off-screen left/top, `2` = fully off-screen right/bottom, e.g. `1.5` → the media pokes out past the right edge and gets cropped. **Use string format for ranges:** `"-0.5~1.5"` (min~max). |
 | `scale_x` / `scale_y` | any number > 0 (default `1`) | **Custom mode only.** Stretch multipliers relative to the **fit size** (scale 1×1 = whole media visible, aspect kept, nothing cropped). `scale_x=2` doubles the width, `scale_y=0.5` halves the height. If a scaled-up media overflows the screen it's cropped; keep `1×1` (or smaller) to stay fully visible. **Use string format for ranges:** `"0.5~1.5"`. |
+| `scale` | any number > 0 | **Custom mode only.** A convenient **uniform** scale: sets BOTH `scale_x` AND `scale_y` to the same value in one key (`"scale": 2` = twice as wide **and** twice as tall). It is **overwritten** when BOTH `scale_x` and `scale_y` are given explicitly in the same sidecar — then those per-axis values are used as-is; a lone `scale_x`/`scale_y` overrides just its own axis. **Use string format for ranges:** `"0.5~1.5"` — for a range, **ONE** random value is drawn and applied to both axes, so X and Y always match. |
 | `flip_h` / `flip_v` | `true` / `false` / `"random"` (default `false`) | **Custom mode only.** Mirror the media horizontally / vertically. **Use string format:** `"random"` to randomly pick true/false on each trigger. |
 | `rotation` | any number (degrees, default `0`) | **Custom mode only.** Rotate the media around its own center (e.g. `45`, `-90`, `180`). **Use string format for ranges:** `"0~360"`. |
 | `duration` | any number > 0 (seconds) | How long to show (images). Videos ignore it. |
@@ -139,6 +154,7 @@ volume=0.8
 | `fade_out_seconds` | any number >= 0 (seconds) | Override for the global `fade_out_seconds` — how long the fade-out lasts. Image-only; ignored by videos. The old name `fade_seconds` is accepted as a deprecated alias (a warning asks you to rename it). |
 | `fade_in_seconds` | any number >= 0 (seconds, default `0`) | Override for the global `fade_in_seconds` — the image/GIF fades in from transparent **before** the display clock starts, so total lifetime = fade_in + display + fade_out. `0` = appears instantly. Image/GIF-only; ignored by videos. |
 | `volume` | 0.0 – 1.0 | Volume for that file (multiplied with global `audio_volume`). |
+| `weight` | any number >= 0 (default `1`; floats allowed) | How likely this media is **picked** by the random trigger (per-file; works in **any** `mode`). `2` = twice as likely as a weight-`1` file, `0.5` = half as likely. `0` = **never picked** (a warning is logged: "…will NOT show (never picked)"). The chance is `weight / total_weight` across all media — e.g. 3 files where one has `weight: 2` → that one gets 2/4 = 50%, the other two 1/4 = 25% each. If every file has weight `0`, nothing is picked at all. |
 | `speed` | any number > 0 (default `1`) | Playback speed multiplier for this file: video + its audio, GIFs, sidecar audio, **and** image display time + fades (all timings scale by 1/speed). `2` = twice as fast, `0.5` = half. With `pitch=1` the audio speeds up tape-style (pitch rises with speed); with `pitch != 1` speed and pitch are independent (audio is re-encoded via ffmpeg). **Use string format for ranges:** `"1.0~2.0"`. |
 | `pitch` | any number > 0 (default `1`) | Audio pitch multiplier for this file: sidecar audio and the audio of videos (the embedded track is extracted + re-encoded). `2` = an octave up, `0.5` = an octave down. Requires ffmpeg; independent of `speed`. **Use string format for ranges:** `"0.5~1.5"`. |
 | `speed_pitch` | any number >= 0 (default `0` = off) | Sets **both** speed and pitch at once (`speed = pitch = this value`, e.g. `1.5` = 1.5× speed AND 1.5× pitch). When set (per-file > global) it **overrides** the individual `speed`/`pitch` values — handy for randomizing both together later. `0`/absent = use `speed` and `pitch` separately. **Use string format for ranges:** `"1.0~2.0"`. |
@@ -184,7 +200,9 @@ When an overlay triggers (a roll succeeds, or you use `--test` / `--play`):
    `cover-width` (fit the entire screen vertically — crop left/right when the
    media is wider), `fit` (no stretching), and `custom` — position the media
    anywhere with `position_x/position_y` (0..1 edge-pinning), stretch it
-   independently with `scale_x/scale_y` (relative to the fit size),
+   independently with `scale_x/scale_y` (relative to the fit size) — or
+   uniformly with a single `scale` key (sets BOTH X and Y; overwritten
+   when `scale_x` AND `scale_y` are both given explicitly) —
    mirror it with `flip_h/flip_v`, and rotate it with `rotation` (degrees
    around its center). The custom values only apply when `mode` is `custom`.
 3. **Images:** shown for `image_display_seconds` (or sidecar `duration`),
@@ -247,12 +265,40 @@ playback.
 
 ## Test assets
 
-Run the generator to create a test PNG and a green-screen test MP4 (the green
-background is for the upcoming chroma key phase, Phase 3):
+Run the generator to create a test PNG and a green-screen test MP4 (the green background is for the chroma-key test, Phase 3):
 
 ```bat
 .venv\Scripts\python scripts\make_test_asset.py
 ```
+
+---
+
+## Chroma-key preprocessing cache (videos)
+
+Computing the chroma-key alpha mask costs ~50–60 ms per 720p frame — far too
+slow to do live for a 60 fps clip. DYST therefore pre-processes each video
+**once** and caches the per-frame alpha masks (in `.cache\precache\` next to
+the app). Playback from cache applies the stored alpha in ~2–5 ms/frame, so
+clips play at (or very near) real time.
+
+The cache is **lazy** — nothing is preprocessed up-front:
+
+- **`--play` / `--test`**: a chroma video without a cache is preprocessed
+  first (progress logged), then played from the cache. Every later call
+  plays instantly from the cache.
+- **daemon**: when a trigger picks an uncached chroma video, the chance loop
+  **pauses**, the video is preprocessed in the background (already-playing
+  overlays keep running), then the overlay spawns from the cache and the
+  loop **resumes**. Parallel triggers on the same video are grouped into one
+  preprocessing job. Later occurrences spawn instantly.
+- **Invalidation is automatic**: the cache key covers the media file (path,
+  size, modification time) AND the chroma settings (preset/ranges/despill).
+  Changing the file or your chroma config rebuilds the cache on the next
+  trigger. Delete the whole `.cache\` folder to free all space (disk usage
+  is roughly one byte per pixel per frame — e.g. ~97 MB for a 1.8 s 720p60
+  clip; longer/higher-res clips use proportionally more).
+- Images/GIFs are keyed live at load time (one-time, milliseconds) and are
+  not part of this cache.
 
 ---
 
@@ -272,7 +318,7 @@ Everything is logged to **`app.log`** next to the app (and the console). Set
 ## What's coming (see PROGRESS.md for details)
 
 - **Phase 2** — media validation (skip corrupt files), sidecar audio files
-- **Phase 3** — chroma key: green-screen removal so green-bg videos/images
+- **Phase 3** — chroma key: green-screen removal so green-bg videos/images lose their screen (HSV mask + feathered alpha). Now implemented — run `scripts/test_chroma.py` to verify.
   become fully transparent
 - **Phase 4** — overlay polish (GIF/APNG animation, monitor selection)
 - **Phase 5** — overlay manager (global max concurrency) + full audio

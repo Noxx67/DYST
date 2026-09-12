@@ -18,8 +18,8 @@ import random
 import signal
 import sys
 
-from dyst import __version__, config as cfg, media
-from dyst.media import _validate_settings
+from dyst import __version__, chroma as chroma_mod, config as cfg, media, precache as precache_mod
+from dyst.media import _parse_txt_settings, _validate_settings
 
 log = logging.getLogger("dyst.main")
 
@@ -67,6 +67,47 @@ def resolve_speed_pitch(settings: dict, config: dict) -> tuple[float, float]:
     speed = _resolve_val(settings.get("speed"), config.get("speed", 1.0))
     pitch = _resolve_val(settings.get("pitch"), config.get("pitch", 1.0))
     return speed, pitch
+
+
+def resolve_scale(settings: dict, config: dict) -> tuple[float, float]:
+    """Resolve the effective custom-mode (scale_x, scale_y).
+
+    The uniform `scale` key sets BOTH axes to the same value (scale 2 =
+    twice as wide AND twice as tall). For a range value (e.g. "0.3~0.6")
+    ONE random value is drawn and applied to both axes, so X and Y always
+    match. It is overwritten when BOTH `scale_x` and `scale_y` are given
+    explicitly in the per-file settings (then the two per-axis values are
+    used as-is — each may randomize independently); a lone
+    `scale_x`/`scale_y` overrides just its own axis. Without any per-file
+    scale key, the global `scale_x`/`scale_y` config applies. Values can
+    be single numbers or (lo, hi) tuples for randomization.
+    """
+    def _r(v, d):
+        if v is None:
+            return d
+        if isinstance(v, tuple) and len(v) == 2:
+            try:
+                lo, hi = v
+                return random.uniform(lo, hi)
+            except (TypeError, ValueError):
+                return d
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return d
+
+    sx = settings.get("scale_x")
+    sy = settings.get("scale_y")
+    s = settings.get("scale")
+    if sx is not None and sy is not None:
+        # BOTH per-axis keys given explicitly -> they overwrite `scale`.
+        return _r(sx, 1.0), _r(sy, 1.0)
+    # Draw the uniform `scale` ONCE so both axes share the same value.
+    s_resolved = _r(s, None)
+    if s_resolved is None:
+        return _r(sx, config.get("scale_x", 1.0)), \
+               _r(sy, config.get("scale_y", 1.0))
+    return _r(sx, s_resolved), _r(sy, s_resolved)
 
 
 def get_base_dir() -> str:
@@ -131,16 +172,61 @@ def _apply_console_mode(config: dict) -> None:
     sys.stderr = io.StringIO()
 
 
-def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None":
+def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "OverlayWindow | None":
+    """Spawn one overlay for *item*.
+
+    pre=True (one-shot modes: --play / --test): if the video needs chroma key
+    and has no valid cache yet, it is PRE-PROCESSED synchronously first (with
+    progress logs) and then played from the cache — the first playback is
+    already smooth. pre=False (daemon tick path): the caller (spawner) handles
+    preprocessing asynchronously; if the cache is still missing here the
+    overlay falls back to live keying instead of blocking.
+    """
     from dyst.overlay import OverlayWindow  # lazy: only Qt modes need it
 
     # Route videos: AV1 -> OpenCV+extracted-audio (no Qt hwaccel spam);
-    # everything else -> QtMultimedia (audio).
+    # everything else -> QtMultimedia (audio + modern codecs).
+    settings = item.settings or {}
+    # Chroma key (green/blue screen removal): decided ONCE here, passed to
+    # the overlay. Global enabled + exceptions (config.json) plus a
+    # per-file "chroma": false override. Videos that need chroma can't use
+    # QtMultimedia (it decodes internally), so they route to "video-chroma"
+    # (OpenCV frames + sidecar-or-extracted audio via ffmpeg).
+    chroma_key_cfg = config.get("chroma_key", {})
+    use_chroma = chroma_mod.should_apply(item.path, chroma_key_cfg, settings)
+    chroma_params = chroma_key_cfg if use_chroma else None
+    log.debug("chroma: %s for %s (enabled=%s, preset=%r, hue=%s, sat=%s, val=%s)",
+              "ON" if use_chroma else "OFF",
+              os.path.basename(item.path),
+              chroma_key_cfg.get("enabled"), chroma_key_cfg.get("preset"),
+              chroma_key_cfg.get("hue_range"), chroma_key_cfg.get("saturation_range"),
+              chroma_key_cfg.get("value_range"))
+    # Chroma videos play from the pre-processed alpha-mask cache when one
+    # exists (precompute once, then ~2-5 ms/frame instead of ~50-60 ms keying).
+    # See dyst/precache.py for the cache policy (lazy, invalidated on media or
+    # settings change).
+    cached = None
     if item.kind == "video":
-        kind = "video-av1" if media.is_av1(item.path) else "video-qt"
+        if use_chroma:
+            cached = precache_mod.cache_ready(item.path, chroma_key_cfg)
+            if cached is None and pre:
+                log.info("precache: preprocessing %s (first use with the "
+                         "current chroma settings) — one-time",
+                         os.path.basename(item.path))
+                cached = precache_mod.ensure(
+                    item.path, chroma_key_cfg,
+                    progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n))
+            kind = "video-chroma-cached" if cached else "video-chroma"
+            if cached:
+                log.debug("precache: cache HIT for %s — playing from cached "
+                          "alpha masks (%d frames, %.1fs video)",
+                          os.path.basename(item.path),
+                          cached["meta"]["frame_count"],
+                          cached["meta"]["frame_count"] / cached["meta"]["fps"])
+        else:
+            kind = "video-av1" if media.is_av1(item.path) else "video-qt"
     else:
         kind = item.kind
-    settings = item.settings or {}
     # Per-file overrides from the same-named .json/.txt sidecar (AGENTS.md).
     # NOTE: image_display_seconds / fade_out_seconds overrides only apply to images;
     # videos use the global config values (per-file values are ignored).
@@ -152,10 +238,13 @@ def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None
     # mode == "custom"; per-file sidecar wins over the global config keys.
     custom = {}
     for key, default in (("position_x", 0.5), ("position_y", 0.5),
-                         ("scale_x", 1.0), ("scale_y", 1.0),
                          ("flip_h", False), ("flip_v", False),
                          ("rotation", 0.0)):
         custom[key] = settings.get(key, config.get(key, default))
+    # scale: the uniform `scale` key stretches BOTH axes (per-file wins over
+    # global defaults); it is overwritten when BOTH `scale_x` AND `scale_y`
+    # are given explicitly in the per-file settings (see resolve_scale).
+    custom["scale_x"], custom["scale_y"] = resolve_scale(settings, config)
     # max_duration: hard cap on the whole overlay (visual + audio). Per-file
     # wins over global; 0 = no cap. Uses "in settings" (not `or`) so a per-file
     # 0 can explicitly disable a global cap.
@@ -178,9 +267,6 @@ def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None
         image_seconds = config["image_display_seconds"]
         fade_out_seconds = config["fade_out_seconds"]
         fade_in_seconds = 0.0  # videos don't fade in (they also end instantly)
-    print(f"[CONFIG] Global image_display_seconds={cfg.DEFAULTS['image_display_seconds']}, fade_out_seconds={cfg.DEFAULTS['fade_out_seconds']}")
-    print(f"[CONFIG] Per-file image_display_seconds={settings.get('image_display_seconds')}, fade_out_seconds={settings.get('fade_out_seconds')}")
-    print(f"[CONFIG] Using image_seconds={image_seconds}, fade_out_seconds={fade_out_seconds} for {item.kind}")
     win = OverlayWindow()
     if not win.load(item.path, kind,
                     image_seconds=image_seconds,
@@ -190,6 +276,8 @@ def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None
                     volume=volume,
                     mode=mode,
                     custom=custom,
+                    chroma=chroma_params,
+                    cached=cached,
                     max_duration=max_duration,
                     speed=speed,
                     pitch=pitch,
@@ -202,13 +290,28 @@ def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None
 
 def _run_daemon(app, config: dict) -> None:
     """Chance loop without tray: ticker + overlays. Manager (global concurrency,
-    audio) lands in Phase 5."""
+    audio) lands in Phase 5.
+
+    Chroma-video lazy pre-processing (per user request): when a trigger picks
+    an uncached chroma video, the ticker PAUSES, the video is preprocessed in
+    a worker thread (already-playing overlays keep running), the overlay then
+    spawns from the cache, and the ticker resumes. Later occurrences of the
+    same video spawn instantly from the cache. Several triggers landing on
+    the same video while it preprocesses are grouped on one job.
+    """
+    import threading
     from dyst.overlay import OverlayWindow
     from dyst.ticker import Ticker
+    from PySide6.QtCore import QObject, Signal
 
     overlays = []
+    ticker_holder: list = []          # ticker is created after the spawner
+    precache_jobs: dict = {}          # cache_key -> {"items": [...], "thread": Thread}
 
-    def spawner(item: media.MediaItem) -> bool:
+    class _PreCacheDone(QObject):
+        done = Signal()
+
+    def _try_spawn(item: media.MediaItem) -> bool:
         # enforce max_concurrent limit (0 = unlimited)
         cap = int(config.get("max_concurrent", 0) or 0)
         if cap > 0 and len(overlays) >= cap:
@@ -225,6 +328,64 @@ def _run_daemon(app, config: dict) -> None:
 
         win.finished.connect(done)
         return True
+
+    def _on_precache_done(key: str) -> None:
+        log.debug("precache: job %s finished callback (GUI thread)", key[:8])
+        entry = precache_jobs.pop(key, None)
+        if entry:
+            entry["sig"] = None  # allow the signal bridge to be GC'd now
+        # Resume the chance loop once no preprocessing job remains.
+        if not precache_jobs and ticker_holder and ticker_holder[0]:
+            log.info("precache: done — chance loop resumed")
+            ticker_holder[0].start()
+        if entry:
+            # Cache is ready now (or preprocessing failed — _spawn_overlay
+            # falls back to live keying); spawn everything that was queued.
+            for item in entry["items"]:
+                _try_spawn(item)
+
+    def _precache_worker(item: media.MediaItem, cfg: dict, sig) -> None:
+        try:
+            precache_mod.ensure(
+                item.path, cfg.get("chroma_key", {}),
+                progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n))
+        finally:
+            log.debug("precache: worker thread done, emitting completion")
+            sig.done.emit()  # queued -> GUI thread
+
+    def spawner(item: media.MediaItem) -> bool:
+        cap = int(config.get("max_concurrent", 0) or 0)
+        if cap > 0 and len(overlays) >= cap:
+            log.debug("max_concurrent (%s) reached – skipping spawn", cap)
+            return False
+        settings = item.settings or {}
+        chroma_key_cfg = config.get("chroma_key", {})
+        if (item.kind == "video"
+                and chroma_mod.should_apply(item.path, chroma_key_cfg, settings)
+                and precache_mod.cache_ready(item.path, chroma_key_cfg) is None):
+            # First (or parallel) trigger(s) on an uncached chroma video:
+            # pause the loop, preprocess once, spawn from cache afterwards.
+            key = precache_mod.cache_key(item.path, chroma_key_cfg)
+            entry = precache_jobs.setdefault(key, {"items": [], "thread": None})
+            if entry["thread"] is None:
+                if ticker_holder and ticker_holder[0]:
+                    ticker_holder[0].stop()  # pause the chance loop
+                    log.info("precache: chance loop PAUSED while %s is "
+                             "preprocessed (one-time)", os.path.basename(item.path))
+                sig = _PreCacheDone()
+                sig.done.connect(lambda k=key: _on_precache_done(k))
+                # Keep the signal bridge referenced from the GUI side: the
+                # worker thread only holds it until emit(); if nothing else
+                # references it, PySide6 GCs the QObject before the queued
+                # event is delivered and the completion callback never runs.
+                entry["sig"] = sig
+                entry["thread"] = threading.Thread(
+                    target=_precache_worker, args=(item, config, sig), daemon=True)
+                entry["thread"].start()
+            if item not in entry["items"]:
+                entry["items"].append(item)
+            return True  # trigger consumed; the overlay spawns after preprocessing
+        return _try_spawn(item)
 
 
     def quit_now(*_a) -> None:
@@ -256,6 +417,7 @@ def _run_daemon(app, config: dict) -> None:
 
     ticker = Ticker(lambda: media.pick_from(pool), spawner, config, app)
     app._ticker = ticker  # keep alive & parented to app
+    ticker_holder.append(ticker)  # spawner can pause/resume for preprocessing
     ticker.start()
     log.info("daemon: running (odds=1/%s, tick=%ss)",
              config["odds"], config["tick_seconds"])
@@ -300,19 +462,14 @@ def _run_qt(config: dict, args) -> int:
                 # Merge: keep existing mode/volume, add new display settings
                 existing = item.settings
                 for k in ("image_display_seconds", "fade_out_seconds", "fade_in_seconds",
-                          "mode", "volume", "opacity",
-                          "position_x", "position_y", "scale_x", "scale_y",
+                          "mode", "volume", "weight", "opacity", "chroma",
+                          "position_x", "position_y", "scale_x", "scale_y", "scale",
                           "flip_h", "flip_v", "rotation", "max_duration",
                           "speed", "pitch", "speed_pitch"):
                     if k in raw and raw[k] is not None:
                         existing[k] = raw[k]
             break  # Found settings, stop looking
-        # Print configuration values
-        settings = item.settings or {}
-        print(f"[CONFIG] Global image_display_seconds={cfg.DEFAULTS['image_display_seconds']}, fade_out_seconds={cfg.DEFAULTS['fade_out_seconds']}")
-        print(f"[CONFIG] Per-file image_display_seconds={settings.get('image_display_seconds')}, fade_out_seconds={settings.get('fade_out_seconds')}")
-        print(f"[CONFIG] Using image_seconds={settings.get('image_display_seconds', cfg.DEFAULTS['image_display_seconds'])}, fade_out_seconds={settings.get('fade_out_seconds', cfg.DEFAULTS['fade_out_seconds'])} for {item.kind}")
-        win = _spawn_overlay(config, item)
+        win = _spawn_overlay(config, item, pre=True)
         if win is None:
             return 1
         win.finished.connect(app.quit)
@@ -324,7 +481,7 @@ def _run_qt(config: dict, args) -> int:
             log.error("no media found under %s - run scripts/make_test_asset.py first",
                       config["media_folder"])
             return 1
-        win = _spawn_overlay(config, item)
+        win = _spawn_overlay(config, item, pre=True)
         if win is None:
             return 1
         win.finished.connect(app.quit)
