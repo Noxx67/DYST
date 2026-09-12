@@ -65,10 +65,12 @@ def main() -> int:
         assert c["max_concurrent"] == 0, c
         assert c["volume"] == 0.5, c
         assert c["reroll_in_same_tick"] is True, c  # untouched -> default
+        # NOTE: chroma_key config validation is DEPRECATED (runtime chroma key removed)
+        # These tests verify the validator still loads without warnings (inert config)
         assert c["chroma_key"]["enabled"] is False, c
         assert c["chroma_key"]["hue_range"] == [40, 80], c
         assert c["chroma_key"]["saturation_range"] == [40, 255], c
-        print("PASS valid config -> merged")
+        print("PASS valid config -> merged (chroma_key DEPRECATED)")
 
         # 3. Malformed JSON -> defaults, no crash
         p = _write(tmp, "bad.json", "{ this is not json ")
@@ -101,11 +103,12 @@ def main() -> int:
         assert c["monitor"] == cfg.DEFAULTS["monitor"], c
         assert c["max_concurrent"] == cfg.DEFAULTS["max_concurrent"], c
         assert c["fade_out_seconds"] == cfg.DEFAULTS["fade_out_seconds"], c
+        # NOTE: chroma_key config validation is DEPRECATED (runtime chroma key removed)
         assert c["chroma_key"] == cfg.DEFAULTS["chroma_key"], c
-        print("PASS invalid values -> defaults")
+        print("PASS invalid values -> defaults (chroma_key DEPRECATED)")
 
-        # 5b. Chroma-key presets: named values fill in the ranges; explicit
-        # per-key ranges still override a preset; unknown presets ignored.
+        # NOTE: chroma presets validation is DEPRECATED (runtime chroma key removed)
+        # These tests verify the validator still handles presets without crash (inert config)
         for name, (hr, sr, vr) in [
             ("green", ([35, 85], [40, 255], [40, 255])),
             ("weak green", ([28, 92], [20, 255], [30, 255])),
@@ -134,7 +137,7 @@ def main() -> int:
         c = cfg.load_config(_write(tmp, "preset4.json", {"chroma_key": {"preset": "pink"}}))
         assert c["chroma_key"]["preset"] == cfg.DEFAULTS["chroma_key"]["preset"] == "green"
         assert c["chroma_key"]["hue_range"] == [35, 85]
-        print("PASS chroma presets: green/weak/strong + blue, explicit ranges win, unknown ignored")
+        print("PASS chroma presets: green/weak/strong + blue, explicit ranges win, unknown ignored (DEPRECATED)")
 
         # 6. save_config round-trip
         p = _write(tmp, "roundtrip.json", cfg.DEFAULTS)

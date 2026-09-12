@@ -18,7 +18,7 @@ import random
 import signal
 import sys
 
-from dyst import __version__, chroma as chroma_mod, config as cfg, media, precache as precache_mod
+from dyst import __version__, config as cfg, media
 from dyst.media import _parse_txt_settings, _validate_settings
 
 log = logging.getLogger("dyst.main")
@@ -172,59 +172,19 @@ def _apply_console_mode(config: dict) -> None:
     sys.stderr = io.StringIO()
 
 
-def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "OverlayWindow | None":
-    """Spawn one overlay for *item*.
-
-    pre=True (one-shot modes: --play / --test): if the video needs chroma key
-    and has no valid cache yet, it is PRE-PROCESSED synchronously first (with
-    progress logs) and then played from the cache — the first playback is
-    already smooth. pre=False (daemon tick path): the caller (spawner) handles
-    preprocessing asynchronously; if the cache is still missing here the
-    overlay falls back to live keying instead of blocking.
-    """
+def _spawn_overlay(config: dict, item: media.MediaItem) -> "OverlayWindow | None":
+    """Spawn one overlay for *item*."""
     from dyst.overlay import OverlayWindow  # lazy: only Qt modes need it
 
     # Route videos: AV1 -> OpenCV+extracted-audio (no Qt hwaccel spam);
     # everything else -> QtMultimedia (audio + modern codecs).
+    # NOTE: the runtime chroma-key (green-screen removal) feature is
+    # DEPRECATED and was removed — green-screen assets are expected to be
+    # pre-keyed. The implementation is preserved in git history (commit
+    # a36cc21) and in the stubs dyst/chroma.py + dyst/precache.py.
     settings = item.settings or {}
-    # Chroma key (green/blue screen removal): decided ONCE here, passed to
-    # the overlay. Global enabled + exceptions (config.json) plus a
-    # per-file "chroma": false override. Videos that need chroma can't use
-    # QtMultimedia (it decodes internally), so they route to "video-chroma"
-    # (OpenCV frames + sidecar-or-extracted audio via ffmpeg).
-    chroma_key_cfg = config.get("chroma_key", {})
-    use_chroma = chroma_mod.should_apply(item.path, chroma_key_cfg, settings)
-    chroma_params = chroma_key_cfg if use_chroma else None
-    log.debug("chroma: %s for %s (enabled=%s, preset=%r, hue=%s, sat=%s, val=%s)",
-              "ON" if use_chroma else "OFF",
-              os.path.basename(item.path),
-              chroma_key_cfg.get("enabled"), chroma_key_cfg.get("preset"),
-              chroma_key_cfg.get("hue_range"), chroma_key_cfg.get("saturation_range"),
-              chroma_key_cfg.get("value_range"))
-    # Chroma videos play from the pre-processed alpha-mask cache when one
-    # exists (precompute once, then ~2-5 ms/frame instead of ~50-60 ms keying).
-    # See dyst/precache.py for the cache policy (lazy, invalidated on media or
-    # settings change).
-    cached = None
     if item.kind == "video":
-        if use_chroma:
-            cached = precache_mod.cache_ready(item.path, chroma_key_cfg)
-            if cached is None and pre:
-                log.info("precache: preprocessing %s (first use with the "
-                         "current chroma settings) — one-time",
-                         os.path.basename(item.path))
-                cached = precache_mod.ensure(
-                    item.path, chroma_key_cfg,
-                    progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n))
-            kind = "video-chroma-cached" if cached else "video-chroma"
-            if cached:
-                log.debug("precache: cache HIT for %s — playing from cached "
-                          "alpha masks (%d frames, %.1fs video)",
-                          os.path.basename(item.path),
-                          cached["meta"]["frame_count"],
-                          cached["meta"]["frame_count"] / cached["meta"]["fps"])
-        else:
-            kind = "video-av1" if media.is_av1(item.path) else "video-qt"
+        kind = "video-av1" if media.is_av1(item.path) else "video-qt"
     else:
         kind = item.kind
     # Per-file overrides from the same-named .json/.txt sidecar (AGENTS.md).
@@ -276,8 +236,6 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
                     volume=volume,
                     mode=mode,
                     custom=custom,
-                    chroma=chroma_params,
-                    cached=cached,
                     max_duration=max_duration,
                     speed=speed,
                     pitch=pitch,
@@ -290,26 +248,12 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
 
 def _run_daemon(app, config: dict) -> None:
     """Chance loop without tray: ticker + overlays. Manager (global concurrency,
-    audio) lands in Phase 5.
-
-    Chroma-video lazy pre-processing (per user request): when a trigger picks
-    an uncached chroma video, the ticker PAUSES, the video is preprocessed in
-    a worker thread (already-playing overlays keep running), the overlay then
-    spawns from the cache, and the ticker resumes. Later occurrences of the
-    same video spawn instantly from the cache. Several triggers landing on
-    the same video while it preprocesses are grouped on one job.
-    """
-    import threading
+    audio) lands in Phase 5."""
     from dyst.overlay import OverlayWindow
     from dyst.ticker import Ticker
-    from PySide6.QtCore import QObject, Signal
 
     overlays = []
     ticker_holder: list = []          # ticker is created after the spawner
-    precache_jobs: dict = {}          # cache_key -> {"items": [...], "thread": Thread}
-
-    class _PreCacheDone(QObject):
-        done = Signal()
 
     def _try_spawn(item: media.MediaItem) -> bool:
         # enforce max_concurrent limit (0 = unlimited)
@@ -329,62 +273,7 @@ def _run_daemon(app, config: dict) -> None:
         win.finished.connect(done)
         return True
 
-    def _on_precache_done(key: str) -> None:
-        log.debug("precache: job %s finished callback (GUI thread)", key[:8])
-        entry = precache_jobs.pop(key, None)
-        if entry:
-            entry["sig"] = None  # allow the signal bridge to be GC'd now
-        # Resume the chance loop once no preprocessing job remains.
-        if not precache_jobs and ticker_holder and ticker_holder[0]:
-            log.info("precache: done — chance loop resumed")
-            ticker_holder[0].start()
-        if entry:
-            # Cache is ready now (or preprocessing failed — _spawn_overlay
-            # falls back to live keying); spawn everything that was queued.
-            for item in entry["items"]:
-                _try_spawn(item)
-
-    def _precache_worker(item: media.MediaItem, cfg: dict, sig) -> None:
-        try:
-            precache_mod.ensure(
-                item.path, cfg.get("chroma_key", {}),
-                progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n))
-        finally:
-            log.debug("precache: worker thread done, emitting completion")
-            sig.done.emit()  # queued -> GUI thread
-
     def spawner(item: media.MediaItem) -> bool:
-        cap = int(config.get("max_concurrent", 0) or 0)
-        if cap > 0 and len(overlays) >= cap:
-            log.debug("max_concurrent (%s) reached – skipping spawn", cap)
-            return False
-        settings = item.settings or {}
-        chroma_key_cfg = config.get("chroma_key", {})
-        if (item.kind == "video"
-                and chroma_mod.should_apply(item.path, chroma_key_cfg, settings)
-                and precache_mod.cache_ready(item.path, chroma_key_cfg) is None):
-            # First (or parallel) trigger(s) on an uncached chroma video:
-            # pause the loop, preprocess once, spawn from cache afterwards.
-            key = precache_mod.cache_key(item.path, chroma_key_cfg)
-            entry = precache_jobs.setdefault(key, {"items": [], "thread": None})
-            if entry["thread"] is None:
-                if ticker_holder and ticker_holder[0]:
-                    ticker_holder[0].stop()  # pause the chance loop
-                    log.info("precache: chance loop PAUSED while %s is "
-                             "preprocessed (one-time)", os.path.basename(item.path))
-                sig = _PreCacheDone()
-                sig.done.connect(lambda k=key: _on_precache_done(k))
-                # Keep the signal bridge referenced from the GUI side: the
-                # worker thread only holds it until emit(); if nothing else
-                # references it, PySide6 GCs the QObject before the queued
-                # event is delivered and the completion callback never runs.
-                entry["sig"] = sig
-                entry["thread"] = threading.Thread(
-                    target=_precache_worker, args=(item, config, sig), daemon=True)
-                entry["thread"].start()
-            if item not in entry["items"]:
-                entry["items"].append(item)
-            return True  # trigger consumed; the overlay spawns after preprocessing
         return _try_spawn(item)
 
 
@@ -469,7 +358,7 @@ def _run_qt(config: dict, args) -> int:
                     if k in raw and raw[k] is not None:
                         existing[k] = raw[k]
             break  # Found settings, stop looking
-        win = _spawn_overlay(config, item, pre=True)
+        win = _spawn_overlay(config, item)
         if win is None:
             return 1
         win.finished.connect(app.quit)
@@ -481,7 +370,7 @@ def _run_qt(config: dict, args) -> int:
             log.error("no media found under %s - run scripts/make_test_asset.py first",
                       config["media_folder"])
             return 1
-        win = _spawn_overlay(config, item, pre=True)
+        win = _spawn_overlay(config, item)
         if win is None:
             return 1
         win.finished.connect(app.quit)

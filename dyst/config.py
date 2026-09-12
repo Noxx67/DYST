@@ -60,6 +60,10 @@ DEFAULTS: Dict[str, Any] = {
     # Audio
     "volume": 0.8,              # master volume 0.0-1.0
     # Chroma key
+    # DEPRECATED chroma-key block: the runtime chroma-key feature was
+    # removed (main.py never reads this anymore). Kept for backward-compatible
+    # config parsing only — user configs with a chroma_key block still load
+    # without warnings, but the setting has no effect.
     "chroma_key": {
         "enabled": True,
         "preset": "green",      # named preset: "" | green | weak green | strong green | blue | weak blue | strong blue

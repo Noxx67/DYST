@@ -7,12 +7,12 @@ Overall progress tracker. Single source of truth for what has been done and test
 
 ## Status summary
 
-- **Current phase:** Phase 1a (playback spike) ✅ DONE & VERIFIED — media now plays on top
+- **Current phase:** Phase 3b (sync fixes after desktop feedback) ✅ DONE & VERIFIED — chroma cache & audio-first deferred clock working
 - **Also done:** Phase 1 core ticker (roll + burst) ✅ verified
 - **Additional fixes:** ticker config bugs (`_roll_once` missing, `max_concurrent` parser) resolved; Qt Multimedia video overlay error `LoadFailed` enum fix; video playback no longer crashes with AttributeError.
-- **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ (tray wiring pending Phase 6) · **Phase 3 (chroma key) ✅ DONE & VERIFIED**
+- **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ (tray wiring pending Phase 6) · **Phase 3 (chroma key) — REMOVED/DEPRECATED** · Phase 3b (cache + sync) ✅ (code preserved at commit a36cc21)
 - **Packaging:** PyInstaller build ✅ DONE & VERIFIED (Phase 7 partial — see report below)
-- **Last updated:** Phase 3 chroma key (implementation finished + verified; incl. preset-inert fix & --play cleanup)
+- **Last updated:** Phase 3b sync fixes done; runtime chroma key REMOVED (green-screen assets must be pre-keyed); commit a36cc21 preserves the removed implementation
 
 ---
 
@@ -24,7 +24,7 @@ Overall progress tracker. Single source of truth for what has been done and test
 | 1a | Playback spike (minimal overlay + media + CLI) | ✅ verified | + FPS-synced OpenCV path; video-qt (QtMultimedia, audio+AV1) added |
 | 1 | Core loop (ticker) | ✅ verified | minimal spec ticker done (roll + burst); tray/daemon wiring in P6 |
 | 2 | Media scanning & pairing | ✅ done | validation, sidecar audio, per-file settings |
-| 3 | Chroma key module | ✅ verified | HSV mask + feathered alpha (images/GIFs/video frames); presets; per-file override; `video-chroma` routing |
+| 3 | Chroma key module | ⚠️ REMOVED | Implemented (HSV mask + cache + sync) at commit a36cc21, then DEPRECATED/REMOVED — green-screen assets must be pre-keyed |
 | 4 | Overlay window polish | ⬜ not started | monitor selection, animation (GIF/APNG) |
 | 5 | Manager & audio | ⬜ not started | global concurrency, audio/sidecar |
 | 6 | Tray + autostart | ⬜ not started | |
@@ -807,6 +807,32 @@ then he can figure out how to use the chroma key config with the way it is."
 - **Within playback**, being "ahead" is impossible by construction (video only advances when `frame_index < target`, target = audio position × fps).
 
 **Verified (offscreen, instrumented):** video-vs-audio drift **max 0.9 frames (~15 ms at 60 fps), mean 0.4** across playback (was: unbounded run-ahead); overlay finishes at 2.15 s ≈ real media time. `test_phase1` + `test_chroma` green; `--play` exit 0.
+
+## Chroma removal (post-Phase 3b) — DEPRECATED/REMOVED
+
+**Decision:** The runtime chroma-key (green/blue-screen removal) feature was removed from the codebase. Green-screen assets are now expected to be pre-keyed (real alpha channel or already-keyed media).
+
+**What was removed:**
+- `dyst/chroma.py` — replaced with a deprecation stub (full implementation preserved at commit `a36cc21`)
+- `dyst/precache.py` — replaced with a deprecation stub (full implementation preserved at commit `a36cc21`)
+- `dyst/overlay.py` — all chroma/cached routing, `_chroma_params`, `_cached_masks`, `_cached_meta`, `video-chroma`, `video-chroma-cached` kinds, live chroma keying in `_paint_frame`, chroma catch-up logic removed
+- `main.py` — `chroma`/`precache` imports removed; `_spawn_overlay` simplified (no `pre` parameter, no chroma gating, no daemon precache machinery: `_PreCacheDone`, `precache_jobs`, `_precache_worker`, `_on_precache_done`)
+- `dyst/media.py` — per-file `chroma` sidecar key deprecated (logs warning if present)
+- `dyst/config.py` — `chroma_key` block marked DEPRECATED (still validates for backward-compat, but main.py never reads it)
+- `config.json` — `chroma_key` block removed
+- `scripts/test_chroma.py` — deleted
+- `scripts/test_phase0.py` — chroma preset tests marked DEPRECATED (still verify validator inert behavior)
+- `README.md` — chroma config block, cache section, Phase 3 entry updated to DEPRECATED
+- `media/images/woolly-mammoth.json` — `chroma` key removed; deprecation note added to `_hints`
+
+**Rationale:** User decided to switch approach — green-screen removal should be done offline via ffmpeg/pre-keyed assets rather than runtime OpenCV chroma key. The implementation (Phases 3 + 3b) was fully working and verified (cache HIT = ~2–5 ms/frame, audio-first start, sync drift ≤0.9 frames), but the CPU-based approach doesn't scale well and introduces complexity.
+
+**Rollback:** The complete working implementation is preserved in git history at commit `a36cc21` ("Phase 3: chroma key (green/blue screen removal) + lazy per-frame mask cache").
+
+- `git show a36cc21:dyst/chroma.py` → restore chroma pipeline
+- `git show a36cc21:dyst/precache.py` → restore precache layer
+- `git show a36cc21:dyst/overlay.py` → restore overlay with chroma/cached routing
+- `git show a36cc21:main.py` → restore main with chroma gating + daemon precache
 
 ## Known limitations
 

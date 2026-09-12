@@ -89,14 +89,13 @@ with a warning, never crash the app.
                                 // (scripts/download_videos.py reads this;
                                 //  CLI 3rd arg overrides)
 
-  "chroma_key": {               // green-screen removal (Phase 3)
-    "enabled": true,
-    "preset": "green",         // named preset: "" (manual) | green (default) | weak green | strong green | blue | weak blue | strong blue
-    "exceptions": [],           // filenames that skip chroma key
-    "hue_range": [35, 85],
-    "saturation_range": [40, 255],
-    "value_range": [40, 255],
-    "despill": false
+  "chroma_key": {               // DEPRECATED: green-screen removal was REMOVED.
+                           // A config with a chroma_key block still loads
+                           // without warnings (validated, then ignored).
+                           // Green-screen media is expected to be pre-keyed.
+                           // {enabled, preset, exceptions, hue/saturation/
+                           //  value_range, despill} — see git history:
+                           // git show a36cc21:dyst/config.py
   },
 
   "autostart": false,           // start with Windows (Phase 6, coming)
@@ -265,39 +264,18 @@ playback.
 
 ## Test assets
 
-Run the generator to create a test PNG and a green-screen test MP4 (the green background is for the chroma-key test, Phase 3):
+Run the generator to create a test PNG and a test MP4 (`scripts/make_test_asset.py`).
 
-```bat
-.venv\Scripts\python scripts\make_test_asset.py
-```
+**Note:** the green-screen helper clip it generates was used for the
+(now removed) runtime chroma key. Green-screen assets should be
+pre-keyed instead of relying on in-app removal.
 
 ---
 
-## Chroma-key preprocessing cache (videos)
+## Chroma-key preprocessing cache (videos) — DEPRECATED
 
-Computing the chroma-key alpha mask costs ~50–60 ms per 720p frame — far too
-slow to do live for a 60 fps clip. DYST therefore pre-processes each video
-**once** and caches the per-frame alpha masks (in `.cache\precache\` next to
-the app). Playback from cache applies the stored alpha in ~2–5 ms/frame, so
-clips play at (or very near) real time.
-
-The cache is **lazy** — nothing is preprocessed up-front:
-
-- **`--play` / `--test`**: a chroma video without a cache is preprocessed
-  first (progress logged), then played from the cache. Every later call
-  plays instantly from the cache.
-- **daemon**: when a trigger picks an uncached chroma video, the chance loop
-  **pauses**, the video is preprocessed in the background (already-playing
-  overlays keep running), then the overlay spawns from the cache and the
-  loop **resumes**. Parallel triggers on the same video are grouped into one
-  preprocessing job. Later occurrences spawn instantly.
-- **Invalidation is automatic**: the cache key covers the media file (path,
-  size, modification time) AND the chroma settings (preset/ranges/despill).
-  Changing the file or your chroma config rebuilds the cache on the next
-  trigger. Delete the whole `.cache\` folder to free all space (disk usage
-  is roughly one byte per pixel per frame — e.g. ~97 MB for a 1.8 s 720p60
-  clip; longer/higher-res clips use proportionally more).
-- Images/GIFs are keyed live at load time (one-time, milliseconds) and are
+The runtime chroma-key feature was removed (see commit a36cc21).
+This section describes the now-removed cache system for reference.
   not part of this cache.
 
 ---
@@ -318,8 +296,7 @@ Everything is logged to **`app.log`** next to the app (and the console). Set
 ## What's coming (see PROGRESS.md for details)
 
 - **Phase 2** — media validation (skip corrupt files), sidecar audio files
-- **Phase 3** — chroma key: green-screen removal so green-bg videos/images lose their screen (HSV mask + feathered alpha). Now implemented — run `scripts/test_chroma.py` to verify.
-  become fully transparent
+- **Phase 3** — chroma key (green-screen removal): DEPRECATED/removed — green-screen assets are expected to be pre-keyed. See git history (commit a36cc21) for the removed implementation.
 - **Phase 4** — overlay polish (GIF/APNG animation, monitor selection)
 - **Phase 5** — overlay manager (global max concurrency) + full audio
 - **Phase 6** — tray icon, autostart, test-trigger menu

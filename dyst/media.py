@@ -265,11 +265,10 @@ def _validate_settings(path: str, raw: dict) -> dict:
             log.warning("media: %s: invalid weight %r", path, weight)
     chroma_ovr = raw.get("chroma")
     if chroma_ovr is not None:
-        b = _parse_bool(chroma_ovr)
-        if isinstance(b, bool):
-            out["chroma"] = b  # per-file override of chroma key (global default on)
-        else:
-            log.warning("media: %s: invalid chroma %r (use true/false)", path, chroma_ovr)
+        # DEPRECATED: the runtime chroma-key feature was removed (green-screen
+        # media is expected to be pre-keyed). The key is ignored.
+        log.warning("media: %s: per-file 'chroma' setting is deprecated and ignored "
+                    "(chroma key was removed — pre-key your assets)", path)
     image_display = raw.get("image_display_seconds")
     if image_display is not None:
         try:

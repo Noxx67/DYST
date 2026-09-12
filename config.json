@@ -21,11 +21,6 @@
 "flip_v": false, 
 "rotation": 0,
 "volume": 0.3, 
-"chroma_key": 
-  {"enabled": true, 
-  "preset": "green", 
-  "exceptions": [], 
-  "despill": false}, 
 "autostart": false, 
 "debug": true, 
 "download_max_height": 720, 
