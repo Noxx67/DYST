@@ -191,6 +191,14 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
     # (it decodes internally), so they route to "video-chroma" (OpenCV frames
     # + sidecar-or-extracted audio via ffmpeg). Images key at load time.
     chroma_key_cfg = config.get("chroma_key", {})
+    # Per-file "chroma_key" preset override (green/blue/weak/strong
+    # variants): each file can use its own preset independent of the
+    # global one. "chroma: false" (per-file) still wins and disables
+    # keying. chroma_preset_cfg sets enabled=True (choosing a preset
+    # means filter this file).
+    per_preset = settings.get("chroma_key") if settings else None
+    if per_preset:
+        chroma_key_cfg = cfg.chroma_preset_cfg(per_preset, chroma_key_cfg)
     use_chroma = chroma_mod.should_apply(item.path, chroma_key_cfg, settings)
     chroma_params = chroma_key_cfg if use_chroma else None
     log.debug("chroma: %s for %s (enabled=%s, preset=%r, hue=%s, sat=%s, val=%s, despill=%s)",

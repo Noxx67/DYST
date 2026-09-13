@@ -127,6 +127,30 @@ _CHROMA_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def chroma_preset_cfg(preset_name: str, base_cfg: dict) -> dict:
+    """Return a chroma config based on `base_cfg` with the named
+    preset's hue/sat/val ranges swapped in.
+    Used for per-file `chroma_key` overrides in media sidecars —
+    each file can use its own preset (green, blue, weak/strong
+    variants) independent of the global config. `base_cfg`
+    (the global chroma_key dict) is copied so enabled/exceptions/
+    despill are inherited; the result has enabled=True (choosing a
+    preset means filter this file).
+    """
+    name = str(preset_name).strip().lower()
+    preset = _CHROMA_PRESETS.get(name)
+    if preset is None:
+        log.warning("chroma_preset_cfg: unknown preset %r — using base config as-is",
+                    preset_name)
+        return dict(base_cfg)
+    out = dict(base_cfg)
+    out["preset"] = name
+    out["enabled"] = True
+    for k in ("hue_range", "saturation_range", "value_range"):
+        out[k] = list(preset[k])
+    return out
+
+
 def _is_num(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 

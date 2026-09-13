@@ -13,6 +13,8 @@ import os
 import random
 from dataclasses import dataclass, field
 
+from dyst.config import _CHROMA_PRESETS
+
 log = logging.getLogger("dyst.media")
 
 IMAGE_EXTS = {".png", ".gif", ".apng", ".webp", ".jpg", ".jpeg", ".bmp"}
@@ -273,6 +275,19 @@ def _validate_settings(path: str, raw: dict) -> dict:
             out["chroma"] = b
         else:
             log.warning("media: %s: invalid 'chroma' %r (use true/false) — ignored", path, chroma_ovr)
+    chroma_key_ovr = raw.get("chroma_key")
+    if chroma_key_ovr is not None:
+        # Per-file chroma KEY preset (green/blue/weak green/strong green/...)
+        # overrides the global chroma preset for THIS file only. Must be a
+        # known preset name (case-insensitive). Ignored (with a warning) if
+        # unknown — global preset is used instead. Only takes effect when the
+        # per-file "chroma" boolean is true (false wins and disables keying).
+        name = str(chroma_key_ovr).strip().lower()
+        if name in _CHROMA_PRESETS:
+            out["chroma_key"] = name
+        else:
+            log.warning("media: %s: invalid 'chroma_key' %r (use: green, blue, weak green, strong green, weak blue, strong blue) — ignored",
+                        path, chroma_key_ovr)
     image_display = raw.get("image_display_seconds")
     if image_display is not None:
         try:

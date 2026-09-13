@@ -8,7 +8,7 @@ Covers:
 - chroma_key_image / chroma_key_frame: green bg -> transparent, subject kept
 - hole-filling: a small green hole inside the subject stays opaque
 - calibrate: hue window re-centres on the footage's actual screen colour
-- should_apply gating / per-file "chroma" parsing
+- should_apply gating / per-file "chroma" parsing + per-file "chroma_key" preset override
 - precache: build -> HIT, masks shape, one-time cached audio, cache key does
   NOT depend on despill (toggle = no rebuild), invalidates on settings change
 - overlay offscreen: keyed image renders without green bg; video-chroma-cached
@@ -133,7 +133,18 @@ def test_should_apply():
     vs = media._validate_settings
     for val, expect in (("true", True), ("1", True), ("yes", True), ("false", False), ("0", False)):
         assert vs("s.json", {"chroma": val}).get("chroma") == expect
-    check("should_apply + per-file chroma parsing")
+    # per-file chroma_key preset (string, case-insensitive):
+    assert vs("s.json", {"chroma_key": "green"}).get("chroma_key") == "green"
+    assert vs("s.json", {"chroma_key": "  STRONG GREEN  "}).get("chroma_key") == "strong green"
+    assert vs("s.json", {"chroma_key": "blue"}).get("chroma_key") == "blue"
+    assert "chroma_key" not in vs("s.json", {"chroma_key": "pink"})  # unknown -> dropped
+    assert "chroma_key" not in vs("s.json", {"chroma_key": 123})     # non-string -> dropped
+    from dyst.config import chroma_preset_cfg
+    base = cfg.DEFAULTS["chroma_key"]
+    blue = chroma_preset_cfg("blue", base)
+    assert blue["preset"] == "blue" and blue["hue_range"] == [100, 130] and blue["enabled"] is True
+    assert chroma_preset_cfg("nope", base) is not base and chroma_preset_cfg("nope", base)["preset"] == "green"
+    check("should_apply + per-file chroma parsing + per-file chroma_key preset")
 
 
 def test_precache():

@@ -1,5 +1,5 @@
 {
-  "_comment": "DYST config template \u2014 ALL possible keys with hints. Copy to a sidecar file (same base name, .json or .txt) for per-file overrides, or use as the global config.json reference. Loop/global keys (tick_seconds, odds, autostart, ...) only apply in config.json; display/audio/scale keys apply per-file via sidecars.",
+  "_comment": "DYST config template — ALL possible keys with hints. Copy to a sidecar file (same base name, .json or .txt) for per-file overrides, or use as the global config.json reference. Loop/global keys (tick_seconds, odds, autostart, ...) only apply in config.json; display/audio/scale keys apply per-file via sidecars.",
   "tick_seconds": 1.0,
   "odds": 1000,
   "max_concurrent": 3,
@@ -47,13 +47,13 @@
     "pitch": "audio pitch multiplier (> 0). 1.0 = normal, 2 = an octave up, 0.5 = an octave down. Applies to sidecar audio and video embedded audio (extracted + re-encoded). Independent of speed. Requires ffmpeg.",
     "speed_pitch": "combined speed+pitch (>= 0; 0 = off): sets BOTH speed and pitch to this value, OVERRIDING the individual keys (per-file > global). 0 = use speed and pitch separately. Default 0.",
     "monitor": "which monitor: 'primary' or a 0-based monitor index. Default 'primary'.",
-    "mode": "how media covers the screen (default 'fit'): fit = keep aspect, letterbox, centered | stretch = squish to screen | cover-height = fit entire screen horizontally (taller media cropped top/bottom) | cover-width = fit entire screen vertically (wider media cropped left/right) | custom = position/scale/flip/rotate (uses position_x/y, scale_x/y, flip, rotation). Old 'cover' was removed \u2014 falls back to 'fit'.",
-    "chroma_key": "global chroma-key preset: 'off' | 'green' (default) | 'blue' | 'weak green' | 'strong green' | 'weak blue' | 'strong blue'. Presets fill hue/sat/val ranges; explicit ranges still override per-key. Applies to images AND video frames (per-file 'chroma' can override).",
+    "mode": "how media covers the screen (default 'fit'): fit = keep aspect, letterbox, centered | stretch = squish to screen | cover-height = fit entire screen horizontally (taller media cropped top/bottom) | cover-width = fit entire screen vertically (wider media cropped left/right) | custom = position/scale/flip/rotate (uses position_x/y, scale_x/y, flip, rotation). Old 'cover' was removed — falls back to 'fit'.",
+    "chroma_key": "PER-FILE only (in a media sidecar, NOT config.json): the chroma preset to use for THIS file — green, blue, weak green, strong green, weak blue, strong blue. Each file can use a different preset independent of the global chroma_key. Takes effect only with the per-file boolean \"chroma\": true; \"chroma\": false wins and disables keying. In config.json this is a global preset string (off/green/blue/...) — same name, different scope.",
     "position_x": "custom-mode only: X position -1..2 (0 = left edge at screen left, 1 = right edge, 0.5 = centered; outside 0..1 pushes off-screen/peek/crop). Default 0.5.",
     "position_y": "custom-mode only: Y position -1..2 (0 = top, 1 = bottom, 0.5 = centered; outside 0..1 pushes off-screen). Default 0.5.",
     "scale_x": "custom-mode only: width multiplier relative to the 'fit' size (1 = whole media visible, aspect kept). Default 1.0.",
     "scale_y": "custom-mode only: height multiplier relative to the 'fit' size. Default 1.0.",
-    "scale": "custom-mode only (per-file): uniform scale setting BOTH scale_x and scale_y (e.g. 'scale': 2 = twice wide AND tall; also accepts a range like '0.5~1.5' \u2014 one random draw shared by both axes). Overwritten when BOTH scale_x AND scale_y are given explicitly; a lone scale_x/y overrides just its axis.",
+    "scale": "custom-mode only (per-file): uniform scale setting BOTH scale_x and scale_y (e.g. 'scale': 2 = twice wide AND tall; also accepts a range like '0.5~1.5' — one random draw shared by both axes). Overwritten when BOTH scale_x AND scale_y are given explicitly; a lone scale_x/y overrides just its axis.",
     "flip_h": "custom-mode only: mirror horizontally (true/false). Default false.",
     "flip_v": "custom-mode only: mirror vertically. Default false.",
     "rotation": "custom-mode only: rotation in degrees around the media's center (e.g. 45, -90). Default 0.0.",
@@ -64,7 +64,7 @@
     "rescan_seconds": "interval (seconds) for auto-rescanning the media folder for new/removed files. Default 60.",
     "show_console": "true = launch with a visible log terminal; false = hidden background (default). When false on Windows + frozen, the console is detached after config load.",
     "weight": "per-file: pick probability (>= 0; floats allowed; default 1). 2 = twice as likely as a weight-1 file, 0.5 = half. Chance = weight / total_weight across all media. 0 = never picked (logs a warning). Works in ANY mode (not custom-only).",
-    "chroma": "per-file override of the global chroma-key flag: true = filter this file, false = skip filtering even when global chroma_key is on (for files that already have real alpha). Default true."
+    "chroma": "per-file override of the global chroma-key flag: true = filter this file, false = skip filtering even when global chroma_key is on (for files that already have real alpha). Default true.\nNOTE: the per-file boolean \"chroma\" (true/false) gates on/off; per-file \"chroma_key\" sets WHICH preset. \"chroma\": false always wins over a chroma_key preset."
   },
-  "_hints_deprecated": "OLD/REMOVED keys no longer valid: 'cover' (mode) was removed \u2014 falls back to 'fit'; 'fade_seconds' was renamed to 'fade_out_seconds' (old name still accepted as a deprecated alias); per-file 'chroma_key' was replaced by the per-file boolean 'chroma'; per-file 'no_chroma' naming and the per-item overrides UI were deferred. (Loop/global keys like tick_seconds, odds, autostart, etc. are config.json only \u2014 they are not sidecar keys.)"
+  "_hints_deprecated": "OLD/REMOVED keys no longer valid: 'cover' (mode) was removed — falls back to 'fit'; 'fade_seconds' was renamed to 'fade_out_seconds' (old name still accepted as a deprecated alias); per-file 'chroma_key' was replaced by the per-file boolean 'chroma'; per-file 'no_chroma' naming and the per-item overrides UI were deferred. (Loop/global keys like tick_seconds, odds, autostart, etc. are config.json only — they are not sidecar keys.)"
 }
