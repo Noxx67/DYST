@@ -58,6 +58,7 @@ PLAN.md
 PROGRESS.md
 
 # PyInstaller
+icon.ico
 *.manifest
 *.spec
 

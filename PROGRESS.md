@@ -268,6 +268,7 @@ before we continue.
 5. **Rebuilt** with the venv's PyInstaller 6.22.2 using the existing `DYST.spec`
    (onedir, windowed): `./.venv/Scripts/python.exe -m PyInstaller DYST.spec --noconfirm --clean`.
    Output: `dist/DYST/DYST.exe` + `_internal/` (292 MB).
+   **Icon:** `build.py` converts `icon.webp` to `icon.ico` (multi-size) at build time; `DYST.spec` `EXE(icon='icon.ico')` embeds it (verified present as `RT_GROUP_ICON`).
 
 ### How external config/media works (no code change needed)
 

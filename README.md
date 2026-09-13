@@ -310,6 +310,24 @@ Everything is logged to **`app.log`** next to the app (and the console). Set
 
 ---
 
+## Building & packaging
+
+Build a standalone `DYST.exe` with the bundled icon:
+
+```
+.venv\Scripts\python build.py            # full build + stage config/media
+.venv\Scripts\python build.py --skip-copy # build only
+```
+
+`build.py` runs PyInstaller via `DYST.spec`, converts `icon.webp` to `icon.ico`
+(multi-size) at build time, then copies `config.json` and `media/` into
+`dist/DYST/` beside the exe so it stays user-editable (nothing bundled).
+The exe is a console-subsystem binary (`show_console` config toggles it).
+
+Result: `dist/DYST/DYST.exe` (~260 MB with dependencies).
+
+---
+
 ## Recent Changes
 
 - **Fixed image closing prematurely**: Updated `_close_if_ready` in `dyst/overlay.py` to require that the visual media has finished displaying (`_visual_done`), the fade-out animation has completed (`_fade_done`), and the audio has finished (`_audio_done`) before closing the overlay. This prevents the overlay from closing early when the side‑car audio is shorter than the configured display time.
