@@ -59,19 +59,22 @@ DEFAULTS: Dict[str, Any] = {
     "rotation": 0.0,     # degrees (around the placed rect's center)
     # Audio
     "volume": 0.8,              # master volume 0.0-1.0
-    # Chroma key
-    # DEPRECATED chroma-key block: the runtime chroma-key feature was
-    # removed (main.py never reads this anymore). Kept for backward-compatible
-    # config parsing only — user configs with a chroma_key block still load
-    # without warnings, but the setting has no effect.
+    # Chroma key (green/blue screen removal)
     "chroma_key": {
         "enabled": True,
-        "preset": "green",      # named preset: "" | green | weak green | strong green | blue | weak blue | strong blue
+        "preset": "green",
+        # Named presets: "" (manual ranges) | green | weak green | strong
+        # green | blue | weak blue | strong blue. Simple string form in the
+        # user config: "chroma_key": "green" (or "blue"/"off"); the old
+        # dict form {enabled, preset, hue_range, saturation_range,
+        # value_range, despill, exceptions} still loads (expert tuning).
         "exceptions": [],
         "hue_range": [35, 85],
         "saturation_range": [40, 255],
         "value_range": [40, 255],
-        "despill": False,
+        # Despill defaults ON (Phase 3 redo): green fringe on subject edges
+        # was the #1 "masked wrong" look. Edge-only pixel work, cheap.
+        "despill": True,
     },
     # Misc
     "download_max_height": 1080,  # max video height (px) for the downloader
@@ -197,9 +200,34 @@ _TOP_LEVEL_RULES = {
 
 
 def _validate_chroma_key(value: Any) -> Dict[str, Any]:
-    """Validate the nested chroma_key dict; fall back per-key to defaults."""
+    """Validate the chroma_key setting; fall back per-key to defaults.
+
+    Accepts BOTH forms:
+      "chroma_key": "green"      # string: off | green | blue | weak/strong variants
+      "chroma_key": { ... }      # dict: enabled/preset/ranges/despill/exceptions
+    The string form is the simple user-facing way; the dict is the expert
+    escape hatch (old configs keep loading unchanged)."""
+    # Simple string form: "off" | a preset name.
+    if isinstance(value, str):
+        name = value.strip().lower()
+        if name in ("off", "false", "no", "none", "disabled"):
+            out = copy.deepcopy(_CHROMA_KEY_DEFAULTS)
+            out["enabled"] = False
+            return out
+        if not name:
+            return copy.deepcopy(_CHROMA_KEY_DEFAULTS)
+        out = copy.deepcopy(_CHROMA_KEY_DEFAULTS)
+        if name in _CHROMA_PRESETS:
+            p = _CHROMA_PRESETS[name]
+            out["preset"] = name
+            out["hue_range"] = list(p["hue_range"])
+            out["saturation_range"] = list(p["saturation_range"])
+            out["value_range"] = list(p["value_range"])
+        else:
+            log.warning("config: unknown chroma_key %r (use: off, green, blue, weak green, strong green, weak blue, strong blue) — using defaults", value)
+        return out
     if not isinstance(value, dict):
-        log.warning("config: 'chroma_key' must be a dict — using defaults")
+        log.warning("config: 'chroma_key' must be a string or dict — using defaults")
         return copy.deepcopy(_CHROMA_KEY_DEFAULTS)
     out = copy.deepcopy(_CHROMA_KEY_DEFAULTS)
     try:

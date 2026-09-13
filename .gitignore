@@ -66,3 +66,6 @@ PROGRESS.md
 .coverage
 htmlcov/
 .cache/
+
+# pi coding-agent workspace settings
+.pi/

@@ -13,6 +13,7 @@
 "speed_pitch": 0, 
 "monitor": "primary", 
 "mode": "fit", 
+"chroma_key": "strong green", 
 "position_x": 0.5, 
 "position_y": 0.5, 
 "scale_x": 1.0, 

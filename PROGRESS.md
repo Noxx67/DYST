@@ -7,12 +7,12 @@ Overall progress tracker. Single source of truth for what has been done and test
 
 ## Status summary
 
-- **Current phase:** Phase 3b (sync fixes after desktop feedback) ✅ DONE & VERIFIED — chroma cache & audio-first deferred clock working
+- **Current phase:** Phase 3 redo (chroma key restored + improved) ✅ DONE & VERIFIED — despill on by default, spill-hole-filling, auto hue calibration, one-time cached audio; `--play`, daemon lazy-preprocess, and cache playback all verified
 - **Also done:** Phase 1 core ticker (roll + burst) ✅ verified
 - **Additional fixes:** ticker config bugs (`_roll_once` missing, `max_concurrent` parser) resolved; Qt Multimedia video overlay error `LoadFailed` enum fix; video playback no longer crashes with AttributeError.
-- **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ (tray wiring pending Phase 6) · **Phase 3 (chroma key) — REMOVED/DEPRECATED** · Phase 3b (cache + sync) ✅ (code preserved at commit a36cc21)
+- **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ (tray wiring pending Phase 6) · **Phase 3 (chroma key) — restored & improved (Phase 3 redo)** · Phase 3b (cache + sync) — superseded by the redo · Phase 7 partial (PyInstaller) ✅
 - **Packaging:** PyInstaller build ✅ DONE & VERIFIED (Phase 7 partial — see report below)
-- **Last updated:** Phase 3b sync fixes done; runtime chroma key REMOVED (green-screen assets must be pre-keyed); commit a36cc21 preserves the removed implementation
+- **Last updated:** Phase 3 redo done — chroma key restored with quality/UX fixes; runtime config is now the simple `"chroma_key": "green"`/`"blue"`/`"off"` string
 
 ---
 
@@ -24,7 +24,7 @@ Overall progress tracker. Single source of truth for what has been done and test
 | 1a | Playback spike (minimal overlay + media + CLI) | ✅ verified | + FPS-synced OpenCV path; video-qt (QtMultimedia, audio+AV1) added |
 | 1 | Core loop (ticker) | ✅ verified | minimal spec ticker done (roll + burst); tray/daemon wiring in P6 |
 | 2 | Media scanning & pairing | ✅ done | validation, sidecar audio, per-file settings |
-| 3 | Chroma key module | ⚠️ REMOVED | Implemented (HSV mask + cache + sync) at commit a36cc21, then DEPRECATED/REMOVED — green-screen assets must be pre-keyed |
+| 3 | Chroma key module | ✅ re-done | Phase 3 → restored + improved: despill ON, hole-fill, auto hue calibration, cached audio, simple string config (Phase 3 redo below) |
 | 4 | Overlay window polish | ⬜ not started | monitor selection, animation (GIF/APNG) |
 | 5 | Manager & audio | ⬜ not started | global concurrency, audio/sidecar |
 | 6 | Tray + autostart | ⬜ not started | |
@@ -834,6 +834,114 @@ then he can figure out how to use the chroma key config with the way it is."
 - `git show a36cc21:dyst/overlay.py` → restore overlay with chroma/cached routing
 - `git show a36cc21:main.py` → restore main with chroma gating + daemon precache
 
+## Phase 3 redo — chroma key restored + improved ✅ DONE & VERIFIED
+
+**User request:** bring back green-screen removal, but it must not mask the
+wrong on green-screen clips (e.g. the elephant webm), must not drop audio,
+and must not freeze the terminal. Also: the config should not be convoluted.
+
+### What was restored (from commit a36cc21) and changed
+
+- `dyst/chroma.py` — restored pipeline, improved:
+  - **despill now ON by default** (was off): green fringe on subject edges was
+the #1 "masked wrong" look for the elephant clip. Edge-only pixel work,
+cheap. Also channel-aware (pulls blue on blue screens).
+  - **spill-hole filling**: the alpha mask is MORPH_CLOSE'd after erosion so
+small holes punched into the subject by reflected screen colour close up.
+  - **auto hue calibration** (`chroma.calibrate`): at cache-build time the
+hue window is re-centred on the video's actual screen colour (sampled from
+corner patches across frames; measured median hue). Fixed preset windows
+that missed the footage now self-correct (elephant: window [35,85] →
+[33,83], measured bg hue 58–65).
+- `dyst/precache.py` — restored cache, improved:
+  - **despill dropped from the cache fingerprint**: masks don't depend on it
+(toggling despill doesn't rebuild a 100 MB cache).
+  - **audio extracted ONCE into the cache** (`audio.m4a`, best-effort):
+playback uses the cached extraction instead of running ffmpeg per spawn —
+fixes both "sometimes no audio" (no runtime ffmpeg failure point) and the
+spawn-time GUI stall. Sidecar audio still wins per spec.
+  - cache version bumped to 2.
+- `dyst/overlay.py` — re-added `video-chroma` (live fallback) and
+`video-chroma-cached` kinds; cached alpha applied in `_paint_frame`
+(~2–5 ms/frame); cached audio goes through the existing audio-first sync
+clock (`start()`/`_next_frame`/`_audio_end` updated to include the new
+kinds); images + GIF frames keyed at load.
+- `dyst/config.py` — **simple string config**: `"chroma_key": "green"`
+(also `"blue"`, `"off"`, weak/strong variants). The old dict form still
+loads unchanged (expert escape hatch). Default despill now True.
+- `dyst/media.py` — per-file `"chroma": false` override re-enabled
+(it had been deprecated during the removal).
+- `main.py` — chroma gating + precache restored (`--play`/`--test` pre-build
+the cache synchronously; daemon pauses the ticker, preprocesses on a worker
+thread, resumes, then spawns from cache; parallel triggers on the same video
+are grouped into one job).
+- `config.json` → `"chroma_key": "green"`. `media/images/woolly-mammoth.json`
+re-mirrors the per-file `chroma` key + hint (§12.4). README/AGENTS updated.
+
+### Verified (commands + results)
+
+- `py_compile` clean on main.py + all package/script modules.
+- `scripts/test_chroma.py` (new Phase-3-redo suite) → **all checks pass**:
+  - config string form (`green`/`off`/`blue` case-insensitive, unknown→defaults,
+dict form still validated, despill default True),
+  - mask quality: synthetic green bg → subject opaque, bg transparent, a 2×2
+green hole inside the subject CLOSED, despill pulls green on edges only,
+  - calibrate returns a params copy centring the hue window,
+  - should_apply gating + per-file `chroma` parsing (true/false/1/0/yes/no),
+  - precache build → HIT: masks memmap shape (N,H,W); one-time cached audio;
+**despill toggle does NOT change the cache key**, a range change does,
+  - overlay offscreen: keyed image renders without green bg; video-chroma-cached
+plays through to completion,
+  - elephant: 105 frames keyed, subject opaque fraction 0.24 on late frames
+(first ~0.5 s is all-green CONTENT, not a bug), calibrated hue [33,83].
+- `scripts/test_phase0.py` → all pass. `scripts/test_phase1.py` (offscreen)
+→ all pass.
+- `main.py --play <elephant.webm>` (offscreen) → **EXIT 0**: cache HIT
+(105 frames, 1.8 s), plays from `.cache/precache/<key>/audio.m4a` — no
+ffmpeg run at spawn.
+- Daemon with an UNcached copy of the elephant (isolated media folder):
+`chance loop PAUSED while ... preprocessed (one-time)` → calibrated hue
+[33,83] → `chance loop resumed` → spawned from cache HIT → the next trigger
+got cache HIT with no pause. Preprocess ran on the worker thread (GUI stayed
+responsive).
+
+### Limitations (unchanged from the original Phase 3)
+
+- Keying quality depends on footage; per-clip preset or `chroma: false`
+sidecar for assets with real alpha.
+- First ~0.5 s of the elephant clip is all-green content (invisible overlay —
+not a bug).
+- Cache disk cost ≈ 1 byte/pixel/frame (~9 MB/s of 720p video); delete
+`.cache/` to clear. PNG-compressed frames are the documented fallback if
+long clips ever make this hurt.
+
+### 3-redo-2 — smooth playback: steady pacing instead of burst decoding ✅ DONE & VERIFIED
+
+**User report:** "the videos aren't very smooth — is the caching skipping frame?"
+
+**Diagnosis:** the cache stores masks 1:1 (no build-time skipping). The stutter
+was at DISPLAY time: the audio-synced `_next_frame` chased QMediaPlayer's
+coarse `position()` and decoded bursts of up to **30 frames per tick**,
+freezing the GUI then jumping. On top of that, this machine decodes the
+elephant (AV1 **60 fps**) at only ~46 fps raw / ~35 fps with the mask+paint
+step — so frame-for-frame chasing could never be smooth.
+
+**Fix (`dyst/overlay.py`):**
+- per-tick **decode budget** instead of a 30-frame burst allowance:
+  `video-chroma-cached`/`video-av1` = 2 frames/tick, live `video-chroma` = 1
+  (keying is ~50 ms/frame),
+- **every decoded frame is now painted** (previously only the last of each
+  burst showed, so decodes in between were dropped even when decode kept up),
+- the audio clock still decides whether to advance (hold when ahead), but a
+  tick can no longer block the GUI for a burst of work.
+
+**Verified (offscreen, instrumented elephant playback):** painted **68 frames
+over 1.77 s = 38.4 fps**, mean inter-paint gap **26 ms**, only **1 gap
+>100 ms** (audio-end), full real-time duration plays before audio-end closes it
+(previously: freeze-jump stutter + early cut). For 30 fps sources the machine
+decodes at ~46 fps, so they play perfect, steady 30 fps. All suites green:
+test_phase0, test_phase1, test_chroma, `--play <elephant>` exit 0.
+
 ## Known limitations
 
 - `main.py --test/--play` are one-shot (play, then exit). Continuous loop is `--daemon`
@@ -865,12 +973,10 @@ then he can figure out how to use the chroma key config with the way it is."
 
 ## Next steps
 
-1. **User: run `.venv/Scripts/python main.py --test` on the real desktop** to confirm the
-   fullscreen topmost click-through overlay with your own eyes.
-2. **Phase 3 — chroma key:** the next big visual milestone (make the green-bg video
-   actually transparent). Recommended after P2.
-3. Phase 4 — overlay polish (GIF/APNG frames, monitor pick); Phase 5 — manager + audio;
-   Phase 6 — tray/autostart; Phase 7 — packaging.
+1. **User: run `.venv/Scripts/python main.py --play "media/videos/Elephant Green Screen Effect Meme (But Its Actually Green Screen) [Z_Ik77To2T0].webm"` on the real desktop** to eyeball the restored chroma key (cache is already warm — instant start).
+2. Phase 4 — overlay polish (GIF/APNG frames, monitor pick); Phase 5 — manager + audio;
+   Phase 6 — tray/autostart; Phase 7 — packaging (PyInstaller rebuild needed after the
+   chroma restore since chroma.py/precache.py are new again in the bundle).
 
 ## File protection policy
 

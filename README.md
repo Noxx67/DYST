@@ -83,27 +83,28 @@ with a warning, never crash the app.
   "flip_v": false,             // mirror vertically
   "rotation": 0,               // rotation in degrees (around the media's center)
 
-  "audio_volume": 0.8,          // master volume 0.0–1.0
+  "volume": 0.8,               // master volume 0.0–1.0
 
   "download_max_height": 1080,  // max video height (px) for the downloader
                                 // (scripts/download_videos.py reads this;
                                 //  CLI 3rd arg overrides)
 
-  "chroma_key": {               // DEPRECATED: green-screen removal was REMOVED.
-                           // A config with a chroma_key block still loads
-                           // without warnings (validated, then ignored).
-                           // Green-screen media is expected to be pre-keyed.
-                           // {enabled, preset, exceptions, hue/saturation/
-                           //  value_range, despill} — see git history:
-                           // git show a36cc21:dyst/config.py
-  },
+  "chroma_key": "green",      // green-screen removal: "off" | "green" | "blue" |
+                                // "weak green" | "strong green" | "weak blue" | "strong blue".
+                                // Expert tuning (ranges/despill/exceptions) still works via the
+                                // old dict form {enabled, preset, hue_range, saturation_range,
+                                // value_range, despill, exceptions}.
 
   "autostart": false,           // start with Windows (Phase 6, coming)
   "debug": false                // verbose logging to app.log
 }
 ```
 
-**Green-screen presets** — instead of hunting for HSV numbers, set a named preset:
+**Green-screen presets** — instead of hunting for HSV numbers, set the
+`chroma_key` value to a named preset (or use the old dict form for expert
+tuning). `despill` (edge de-greening, default ON) and the hue window are
+auto-applied; the hue window is also auto-re-centred on each video's actual
+screen colour at cache-build time.
 
 | `preset` | hue | saturation | value | Use for |
 |---|---|---|---|---|
@@ -152,12 +153,13 @@ volume=0.8
 | `image_display_seconds` | any number > 0 (seconds) | Override for the global `image_display_seconds` (images only). Takes priority over `duration`. |
 | `fade_out_seconds` | any number >= 0 (seconds) | Override for the global `fade_out_seconds` — how long the fade-out lasts. Image-only; ignored by videos. The old name `fade_seconds` is accepted as a deprecated alias (a warning asks you to rename it). |
 | `fade_in_seconds` | any number >= 0 (seconds, default `0`) | Override for the global `fade_in_seconds` — the image/GIF fades in from transparent **before** the display clock starts, so total lifetime = fade_in + display + fade_out. `0` = appears instantly. Image/GIF-only; ignored by videos. |
-| `volume` | 0.0 – 1.0 | Volume for that file (multiplied with global `audio_volume`). |
+| `volume` | 0.0 – 1.0 | Volume for that file (multiplied with the global `volume`). |
 | `weight` | any number >= 0 (default `1`; floats allowed) | How likely this media is **picked** by the random trigger (per-file; works in **any** `mode`). `2` = twice as likely as a weight-`1` file, `0.5` = half as likely. `0` = **never picked** (a warning is logged: "…will NOT show (never picked)"). The chance is `weight / total_weight` across all media — e.g. 3 files where one has `weight: 2` → that one gets 2/4 = 50%, the other two 1/4 = 25% each. If every file has weight `0`, nothing is picked at all. |
 | `speed` | any number > 0 (default `1`) | Playback speed multiplier for this file: video + its audio, GIFs, sidecar audio, **and** image display time + fades (all timings scale by 1/speed). `2` = twice as fast, `0.5` = half. With `pitch=1` the audio speeds up tape-style (pitch rises with speed); with `pitch != 1` speed and pitch are independent (audio is re-encoded via ffmpeg). **Use string format for ranges:** `"1.0~2.0"`. |
 | `pitch` | any number > 0 (default `1`) | Audio pitch multiplier for this file: sidecar audio and the audio of videos (the embedded track is extracted + re-encoded). `2` = an octave up, `0.5` = an octave down. Requires ffmpeg; independent of `speed`. **Use string format for ranges:** `"0.5~1.5"`. |
 | `speed_pitch` | any number >= 0 (default `0` = off) | Sets **both** speed and pitch at once (`speed = pitch = this value`, e.g. `1.5` = 1.5× speed AND 1.5× pitch). When set (per-file > global) it **overrides** the individual `speed`/`pitch` values — handy for randomizing both together later. `0`/absent = use `speed` and `pitch` separately. **Use string format for ranges:** `"1.0~2.0"`. |
 | `max_duration` | any number >= 0 (seconds, default `0`) | Hard cap for this file. When the timer runs out, the video/image/gif **and** its sidecar audio stop **immediately** and the overlay closes **instantly — no fade-out**. `0` = no cap (play naturally). Setting it smaller than `image_display_seconds` truncates the image display; smaller than a video's length cuts the video off early. Per-file wins over the global `max_duration` — use `0` per-file to disable a global cap for one file. **Use string format for ranges:** `"1.0~5.0"`. |
+| `chroma` | `true` / `false` (default: follow the global `chroma_key`) | Per-file override of the green/blue-screen removal. `false` = **skip keying** even when the global `chroma_key` is on (use it for assets that already have real alpha, or for videos that aren't green-screen at all — they'll also get faster, normal playback). `true` = force keying on this file. |
 
 `duration`, `image_display_seconds`, and `fade_out_seconds` are **image-only** —
 when attached to a video they are silently ignored (videos play to end and use
@@ -227,7 +229,7 @@ overlay window only closes — and only frees its slot for `max_concurrent` —
 once **both** the visual fade and the audio have fully finished.  So an
 image (or video) plus its audio counts as **one** occurrence, not two.
 
-**Audio:** videos play their own audio track (respecting `audio_volume` and
+**Audio:** videos play their own audio track (respecting `volume` and
 any per-file `volume`). You can also add a **sidecar audio file** — same base
 name, same folder (e.g. `scare.mp4` + `scare.wav`, `boo.png` + `boo.wav`) —
 and it takes priority over the video's own audio. Supported: `.mp3 > .wav >
@@ -265,18 +267,39 @@ playback.
 ## Test assets
 
 Run the generator to create a test PNG and a test MP4 (`scripts/make_test_asset.py`).
-
-**Note:** the green-screen helper clip it generates was used for the
-(now removed) runtime chroma key. Green-screen assets should be
-pre-keyed instead of relying on in-app removal.
+The green-screen helper clip it generates is used by `scripts/test_chroma.py`
+to verify the chroma-key + cache pipeline.
 
 ---
 
-## Chroma-key preprocessing cache (videos) — DEPRECATED
+## Chroma key & the preprocessing cache (videos)
 
-The runtime chroma-key feature was removed (see commit a36cc21).
-This section describes the now-removed cache system for reference.
-  not part of this cache.
+Green/blue-screen videos are keyed **once** per (file × settings), cached into
+`.cache/precache/` (memmapped per-frame alpha masks + a one-time extraction
+of the video's audio), and played back from the cache so even high-fps clips
+stay smooth (~2–5 ms/frame of mask work; playback paces to a steady rate,
+so a clip that is only decode-fit for e.g. 30 fps shows ~30 fps instead of
+freezing). Images and GIFs are keyed the same way at load time.
+
+The first trigger of an uncached chroma video pauses the chance loop while
+it is preprocessed on a worker thread (one time only); `--play`/`--test`
+build the cache before showing. Delete the `.cache/` folder to clear
+everything; the cache is invalidated automatically when the media file or
+the `chroma_key` settings change (toggling `despill` does NOT rebuild — it
+is applied at playback).
+
+Key behaviour:
+- Applies to the whole pool while `chroma_key` is on — a per-file
+  `"chroma": false` sidecar skips it (e.g. assets with real alpha, or
+  non-green-screen videos you'd rather play on the fast path).
+- The hue window is auto-re-centred on each video's actual screen colour at
+  cache-build time (`despill` — edge de-greening — is on by default), so
+  most clips just work with `"chroma_key": "green"`.
+- A sidecar audio file always wins over the video's own audio.
+- The first ~half-second of some clips is all green screen — that is the
+  video's content, not a bug (the overlay is just invisible then).
+- Keying quality depends on the footage: even lighting, no green on the
+  subject, non-green shadows.
 
 ---
 
@@ -295,8 +318,8 @@ Everything is logged to **`app.log`** next to the app (and the console). Set
 
 ## What's coming (see PROGRESS.md for details)
 
-- **Phase 2** — media validation (skip corrupt files), sidecar audio files
-- **Phase 3** — chroma key (green-screen removal): DEPRECATED/removed — green-screen assets are expected to be pre-keyed. See git history (commit a36cc21) for the removed implementation.
+- **Phase 2** — media validation (skip corrupt files), sidecar audio files ✅ done
+- **Phase 3** — chroma key (green-screen removal) ✅ done (despill on by default, hole-filling, auto hue calibration, one-time cached audio)
 - **Phase 4** — overlay polish (GIF/APNG animation, monitor selection)
 - **Phase 5** — overlay manager (global max concurrency) + full audio
 - **Phase 6** — tray icon, autostart, test-trigger menu
