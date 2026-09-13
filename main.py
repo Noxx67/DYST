@@ -286,6 +286,43 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
     return win
 
 
+def _handle_autostart(config: dict, args) -> bool:
+    """Sync the Windows Run key with the `autostart` config (source of truth).
+
+    Returns True to keep running, False when the app has already unregistered
+    and stopped (boot launch while autostart is off).
+
+    - autostart ON  -> (re)register the Run key on every launch (a moved or
+      updated executable re-points itself), then keep running silently.
+    - autostart OFF -> if this launch came FROM the Run key (the stored
+      command carries --autostart): the PC just booted us with a stale
+      registration — remove the key and exit immediately. If it was a manual
+      launch, still clear any stale key but keep running.
+    """
+    if os.name != "nt":
+        return True
+    from dyst import autostart as aut  # lazy: winreg is Windows-only
+
+    if config.get("autostart", False):
+        if aut.enable():
+            log.info("autostart: on — registered to start with Windows (Run key)")
+        return True
+
+    stored = aut.get_command()
+    if args.autostart and stored is not None:
+        # Windows booted us via the Run key, but the config now says off:
+        # unregister ourselves and stop, so next boot doesn't start DYST.
+        aut.disable()
+        log.info("autostart: off — removed the Run key and stopping "
+                 "(config says autostart is off)")
+        return False
+    if stored is not None:
+        # Manual launch with a stale registration — tidy it up, keep running.
+        aut.disable()
+        log.info("autostart: off — removed stale Run key (manual launch)")
+    return True
+
+
 def _run_daemon(app, config: dict) -> None:
     """Chance loop without tray: ticker + overlays. Manager (global concurrency,
     audio) lands in Phase 5.
@@ -501,6 +538,9 @@ def main(argv=None) -> int:
                         help="run the chance loop (ticker) without a tray icon")
     parser.add_argument("--roll", action="store_true",
                         help="simulate one roll and print the result")
+    parser.add_argument("--autostart", action="store_true",
+                        help="(written by the app itself into the Windows Run key) "
+                             "marks a boot-launch so the app can self-remove when config says off")
     default_config_path = os.path.join(get_base_dir(), "config.json")
     parser.add_argument("--config", default=default_config_path, help="path to config file")
     args = parser.parse_args(argv)
@@ -518,11 +558,19 @@ def main(argv=None) -> int:
               f"result={'SUCCESS' if result else 'fail'}")
         return 0
 
-    # for pyinstaller to run on daemon automatically
-    if not (args.test or args.play or args.daemon or args.roll):
+    # for pyinstaller to run on daemon automatically (and --autostart alone
+    # boots the daemon too — the flag only marks a registry-boot launch)
+    if not (args.test or args.play or args.daemon or args.roll or args.autostart):
+        args.daemon = True
+    if args.autostart and not (args.test or args.play or args.roll):
         args.daemon = True
 
     if args.test or args.play or args.daemon:
+        # Autostart sync (Windows Run key) — daemon only, so one-shot
+        # --roll/--play/--test runs never touch the registry. When this
+        # returns False the app has already unregistered + stopped.
+        if args.daemon and not _handle_autostart(config, args):
+            return 0
         try:
             return _run_qt(config, args)
         except ImportError as exc:

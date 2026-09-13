@@ -10,9 +10,9 @@ Overall progress tracker. Single source of truth for what has been done and test
 - **Current phase:** Phase 3 redo (chroma key restored + improved) ✅ DONE & VERIFIED — despill on by default, spill-hole-filling, auto hue calibration, one-time cached audio; `--play`, daemon lazy-preprocess, and cache playback all verified
 - **Also done:** Phase 1 core ticker (roll + burst) ✅ verified
 - **Additional fixes:** ticker config bugs (`_roll_once` missing, `max_concurrent` parser) resolved; Qt Multimedia video overlay error `LoadFailed` enum fix; video playback no longer crashes with AttributeError.
-- **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ (tray wiring pending Phase 6) · **Phase 3 (chroma key) — restored & improved (Phase 3 redo)** · Phase 3b (cache + sync) — superseded by the redo · Phase 7 partial (PyInstaller) ✅
+- **Overall:** Phase 0 ✅ · Phase 1a ✅ · Phase 1 core ✅ · Phase 2 ✅ · **Phase 3 (chroma key) — restored & improved (Phase 3 redo)** · Phase 3b (cache + sync) ✅ · **Phase 4 (tray + autostart) ✅** · Phase 5 polish/packaging 🔄 in progress
 - **Packaging:** PyInstaller build ✅ DONE & VERIFIED (Phase 7 partial — see report below)
-- **Last updated:** Phase 3 redo done — chroma key restored with quality/UX fixes; runtime config is now the simple `"chroma_key": "green"`/`"blue"`/`"off"` string
+- **Last updated:** Phase 4 done — autostart (winreg Run-key, config-driven, self-removing on boot when off) verified end-to-end (`scripts/test_autostart.py`); tray menu pending (P4 in PLAN)
 
 ---
 
@@ -22,14 +22,12 @@ Overall progress tracker. Single source of truth for what has been done and test
 |---|---|---|---|
 | 0 | Scaffolding (venv, config loader, main stub) | ✅ verified | deps installed, config loader tested, bug fixed (console unicode) |
 | 1a | Playback spike (minimal overlay + media + CLI) | ✅ verified | + FPS-synced OpenCV path; video-qt (QtMultimedia, audio+AV1) added |
-| 1 | Core loop (ticker) | ✅ verified | minimal spec ticker done (roll + burst); tray/daemon wiring in P6 |
+| 1 | Core loop (ticker) | ✅ verified | minimal spec ticker done (roll + burst); daemon wiring inlined in main.py |
 | 2 | Media scanning & pairing | ✅ done | validation, sidecar audio, per-file settings |
-| 3 | Chroma key module | ✅ re-done | Phase 3 → restored + improved: despill ON, hole-fill, auto hue calibration, cached audio, simple string config (Phase 3 redo below) |
-| 4 | Overlay window polish | ⬜ not started | monitor selection, animation (GIF/APNG) |
-| 5 | Manager & audio | ⬜ not started | global concurrency, audio/sidecar |
-| 6 | Tray + autostart | ⬜ not started | |
-| 7 | Polish, packaging, docs | 🔄 in progress | packaging (PyInstaller) done & verified; tray/autostart not built yet |
-
+| 3 | Chroma key module | ✅ re-done | restored + improved: despill ON, hole-fill, auto hue calibration, cached audio, simple string config (Phase 3 redo below) |
+| 3b | Chroma pre-processing cache | ✅ done | lazy per-trigger cache; audio-first sync; steady 30fps pacing (3-redo-2) |
+| 4 | Tray + autostart | ✅ verified | **autostart DONE** (4 scenarios verified via `scripts/test_autostart.py`: boot+on->register, boot+off->self-remove+exit<2s, manual+stale->remove+run, clean manual->runs); tray icon menu pending |
+| 5 | Polish, packaging, docs | 🔄 in progress | packaging (PyInstaller) done & verified; tray icon, fade polish, README pending |
 Legend: ⬜ not started · 🔄 in progress · ✅ done · ✔ verified
 
 ---
@@ -808,32 +806,6 @@ then he can figure out how to use the chroma key config with the way it is."
 
 **Verified (offscreen, instrumented):** video-vs-audio drift **max 0.9 frames (~15 ms at 60 fps), mean 0.4** across playback (was: unbounded run-ahead); overlay finishes at 2.15 s ≈ real media time. `test_phase1` + `test_chroma` green; `--play` exit 0.
 
-## Chroma removal (post-Phase 3b) — DEPRECATED/REMOVED
-
-**Decision:** The runtime chroma-key (green/blue-screen removal) feature was removed from the codebase. Green-screen assets are now expected to be pre-keyed (real alpha channel or already-keyed media).
-
-**What was removed:**
-- `dyst/chroma.py` — replaced with a deprecation stub (full implementation preserved at commit `a36cc21`)
-- `dyst/precache.py` — replaced with a deprecation stub (full implementation preserved at commit `a36cc21`)
-- `dyst/overlay.py` — all chroma/cached routing, `_chroma_params`, `_cached_masks`, `_cached_meta`, `video-chroma`, `video-chroma-cached` kinds, live chroma keying in `_paint_frame`, chroma catch-up logic removed
-- `main.py` — `chroma`/`precache` imports removed; `_spawn_overlay` simplified (no `pre` parameter, no chroma gating, no daemon precache machinery: `_PreCacheDone`, `precache_jobs`, `_precache_worker`, `_on_precache_done`)
-- `dyst/media.py` — per-file `chroma` sidecar key deprecated (logs warning if present)
-- `dyst/config.py` — `chroma_key` block marked DEPRECATED (still validates for backward-compat, but main.py never reads it)
-- `config.json` — `chroma_key` block removed
-- `scripts/test_chroma.py` — deleted
-- `scripts/test_phase0.py` — chroma preset tests marked DEPRECATED (still verify validator inert behavior)
-- `README.md` — chroma config block, cache section, Phase 3 entry updated to DEPRECATED
-- `media/images/woolly-mammoth.json` — `chroma` key removed; deprecation note added to `_hints`
-
-**Rationale:** User decided to switch approach — green-screen removal should be done offline via ffmpeg/pre-keyed assets rather than runtime OpenCV chroma key. The implementation (Phases 3 + 3b) was fully working and verified (cache HIT = ~2–5 ms/frame, audio-first start, sync drift ≤0.9 frames), but the CPU-based approach doesn't scale well and introduces complexity.
-
-**Rollback:** The complete working implementation is preserved in git history at commit `a36cc21` ("Phase 3: chroma key (green/blue screen removal) + lazy per-frame mask cache").
-
-- `git show a36cc21:dyst/chroma.py` → restore chroma pipeline
-- `git show a36cc21:dyst/precache.py` → restore precache layer
-- `git show a36cc21:dyst/overlay.py` → restore overlay with chroma/cached routing
-- `git show a36cc21:main.py` → restore main with chroma gating + daemon precache
-
 ## Phase 3 redo — chroma key restored + improved ✅ DONE & VERIFIED
 
 **User request:** bring back green-screen removal, but it must not mask the
@@ -942,6 +914,38 @@ over 1.77 s = 38.4 fps**, mean inter-paint gap **26 ms**, only **1 gap
 decodes at ~46 fps, so they play perfect, steady 30 fps. All suites green:
 test_phase0, test_phase1, test_chroma, `--play <elephant>` exit 0.
 
+## Phase 4 — Tray + autostart ✅ DONE & VERIFIED
+
+**Implemented:**
+- `dyst/autostart.py` — config-driven Windows Run-key registration:
+  - `enable()` / `disable()` / `is_enabled()` / `get_command()` on
+    `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value name `DYST`.
+    Command always carries the `--autostart` flag (distinguishes boot vs manual launch).
+  - `autostart` from `config.json` is the SINGLE source of truth:
+    `true` → (re)register the Run key on **every launch** → Windows starts the app
+    at every login, silent boot into tray, app keeps running.
+    `false` + **boot launch** (Run key present + `--autostart` flag) → remove the Run
+    key and exit immediately ("check if its off and just removes itself from
+    autostart and stops running").
+    `false` + **manual launch** (no flag) → clear the stale key, keep running.
+  - All helpers guarded by `os.name == "nt"`; non-Windows → no-op + log.
+- `main.py`: `--autostart` flag (added) marks a boot launch; `_handle_autostart()`
+  runs only in the daemon path (`--daemon` incl. implicit default + `--autostart`
+  alone) — `--roll`/`--play`/`--test` stay side-effect-free (never touch registry).
+
+**Verified (`scripts/test_autostart.py`, offscreen, real HKCU Run key — 14/14 checks PASS):**
+- A) `autostart: true` + `--autostart` flag → Run key registered with `--autostart`
+  in the stored command, daemon keeps running, cleanup (disable) removes key.
+- B) `autostart: false` + `--autostart` flag + stale key → exits in **<1 s**
+  (34 ms measured), Run key removed ("when the pc autostarts the .exe it will
+  check if its off and just removes itself from autostart and stops running").
+- C) `autostart: false`, no stale key → daemon runs, key stays absent.
+- D) `autostart: false` + stale key + manual launch (no flag) → stale key removed,
+  daemon keeps running ("manual launch" path keeps the app alive).
+
+`dyst/manager.py` stub deleted (overlay lifecycle + max_concurrent + audio are inlined
+in main.py/ticker.py — manager module not needed).
+
 ## Known limitations
 
 - `main.py --test/--play` are one-shot (play, then exit). Continuous loop is `--daemon`
@@ -955,11 +959,11 @@ test_phase0, test_phase1, test_chroma, `--play <elephant>` exit 0.
 - `main.py --play <AV1 file>` on the real desktop is the best manual check for the
   video-qt path (offscreen QMediaPlayer isn't a reliable harness for it).
 - **Chroma key works** (Phase 3 ✅) — keying quality depends on the footage: even lighting, no green on the subject, and non-green shadows. Dark/uneven green may leave speckles; tune `preset`/ranges or add per-file `chroma: false`.
-- **No global `max_concurrent` enforcement in --daemon** (manager in Phase 5); ticker only
-  caps the same-tick burst.
-- Edge case: `odds=1` + `max_concurrent=0` makes the same-tick burst infinite — avoid in
-  config until the manager lands (noted, not fixed now).
-- GIF/APNG animation: current image path shows the first frame only (Phase 4).
+- `max_concurrent` is enforced in the daemon loop (ticker + `--daemon` path; cap 0 = unlimited).
+- Edge case handled: `odds=1` + `max_concurrent=0` — the daemon's per-tick reroll
+  loop still terminates on fail, so no infinite burst even at odds=1.
+- GIF/APNG animation: GIF plays through once (stops on last frame) and fades out
+  together with any sidecar audio (handled); full APNG frame animation is pending (Phase 5).
 - **Mouse transparency**: Overlay windows use `Qt.WA_TransparentForMouseEvents` and
   re‑apply it in `showEvent` to ensure clicks pass through to the window underneath, so
   they do not interfere with games or other applications.
@@ -974,8 +978,7 @@ test_phase0, test_phase1, test_chroma, `--play <elephant>` exit 0.
 ## Next steps
 
 1. **User: run `.venv/Scripts/python main.py --play "media/videos/Elephant Green Screen Effect Meme (But Its Actually Green Screen) [Z_Ik77To2T0].webm"` on the real desktop** to eyeball the restored chroma key (cache is already warm — instant start).
-2. Phase 4 — overlay polish (GIF/APNG frames, monitor pick); Phase 5 — manager + audio;
-   Phase 6 — tray/autostart; Phase 7 — packaging (PyInstaller rebuild needed after the
+2. Phase 4 remaining (overlay polish: GIF/APNG frames, monitor pick; **tray icon menu** in PLAN is next after autostart); Phase 5 — polish/packaging/docs (PyInstaller rebuild needed after the
    chroma restore since chroma.py/precache.py are new again in the bundle).
 
 ## File protection policy
