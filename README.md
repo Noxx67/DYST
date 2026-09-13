@@ -51,6 +51,8 @@ There are **3 layers** of configuration, applied in order (later wins):
 
 ### 1. `config.json` (global)
 
+Full key reference with hints: see `config_template.json` (in this folder and in the build output).
+
 Edit this file by hand (a settings window may come later). All keys are
 optional — anything missing falls back to the default. Bad values are ignored
 with a warning, never crash the app.

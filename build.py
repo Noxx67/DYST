@@ -24,8 +24,9 @@ ROOT = Path(__file__).resolve().parent
 SPEC = ROOT / "DYST.spec"
 DIST_DIR = ROOT / "dist" / "DYST"          # PyInstaller onedir output
 CONFIG_SRC = ROOT / "config.json"
+CONFIG_TEMPLATE = ROOT / "config_template.json"
 MEDIA_SRC = ROOT / "media"
-COPY_ITEMS = ("config.json", "media")
+COPY_ITEMS = ("config.json", "config_template.json", "media")
 ICON_SRC = ROOT / "icon.webp"
 ICON_DST = ROOT / "icon.ico"
 
