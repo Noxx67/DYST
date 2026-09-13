@@ -100,6 +100,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='DYST',
+    icon='icon.ico',           # built from icon.webp at build time (build.py)
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

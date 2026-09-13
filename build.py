@@ -26,6 +26,38 @@ DIST_DIR = ROOT / "dist" / "DYST"          # PyInstaller onedir output
 CONFIG_SRC = ROOT / "config.json"
 MEDIA_SRC = ROOT / "media"
 COPY_ITEMS = ("config.json", "media")
+ICON_SRC = ROOT / "icon.webp"
+ICON_DST = ROOT / "icon.ico"
+
+
+def _build_icon() -> bool:
+    """Convert icon.webp -> icon.ico (multi-size) for the EXE.
+
+    Windows .exe icons must be .ico; we generate it at build time from
+    icon.webp so the source asset stays a single image. Drops to a
+    warning if Pillow is missing (icon then stays off).
+    """
+    if not ICON_SRC.is_file():
+        print("[build] no icon.webp found — building without icon")
+        return True
+    try:
+        from PIL import Image
+    except ImportError:
+        print("[build] WARNING: Pillow missing — building without icon",
+              file=sys.stderr)
+        return False
+    try:
+        img = Image.open(ICON_SRC)
+        if img.mode not in ("RGBA", "RGB", "P"):
+            img = img.convert("RGBA")
+        img.save(ICON_DST, format="ICO",
+                 sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+        print(f"[build] icon: {ICON_SRC} -> {ICON_DST}")
+        return True
+    except OSError as exc:
+        print(f"[build] WARNING: failed to build icon.ico: {exc}",
+              file=sys.stderr)
+        return False
 
 
 def _run_build() -> int:
@@ -82,6 +114,8 @@ def main(argv=None) -> int:
     if not SPEC.is_file():
         print(f"[build] ERROR: spec not found: {SPEC}", file=sys.stderr)
         return 1
+
+    _build_icon()  # non-fatal; warns on failure, builds without icon
 
     rc = _run_build()
     if rc != 0:
