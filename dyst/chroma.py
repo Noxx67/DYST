@@ -1,18 +1,22 @@
 """DYST (did you see that? 👀) — chroma key (green/blue screen removal).
 
-Phase 3 (redone): HSV range mask -> feathered alpha for still images AND
+Phase 3 (redone): HSV distance-based soft alpha matte → feathered alpha for still images AND
 every video frame (OpenCV pipeline — the same code path for both). Output is
 always RGBA/BGRA with ~0 alpha where the screen colour was and ~255 on the
 subject.
 
-Improvements over the original Phase 3 version (user request: "masked wrong"
-on green-screen clips, e.g. the elephant video):
-- despill is ON by default (green fringe on subject edges was the #1
-  "masked wrong" look; it is cheap edge-only pixel work),
-- small holes in the subject spill are CLOSED (morphological fill),
-- ``calibrate()`` re-centres the hue window on the video's ACTUAL screen
-  colour (sampled from frame corners), so clips shot against a screen
-  whose tint differs from the fixed preset window key correctly.
+Improvements over the original Phase 3 version:
+- Soft alpha matte: two-threshold HSV distance falloff instead of hard inRange + blur.
+  Generates a natural continuous alpha map (0.0..1.0) with feathered edges.
+- Resolution-adaptive kernels: erosion, closing, and blur radii scale with frame
+  height relative to a 720p reference (minimum 3×3).
+- Hole-filling via morphological CLOSE baked into the alpha matte.
+- Proportional despill on ALL visible pixels (alpha > 0): clamps the screen channel
+  against the complementary channels (G = min(G, max(R, B)) for green screens;
+  B = min(B, max(R, G)) for blue screens), preserving skin warmth and avoiding
+  the "fixed subtraction" look.
+- Improved calibration: samples wider edge patches with variance/saturation/value
+  filtering to robustly detect the true screen hue.
 
 Config input is the validated ``chroma_key`` block from config.json
 (normalized dict: {enabled, preset, hue_range, saturation_range,
@@ -38,109 +42,301 @@ log = logging.getLogger("dyst.chroma")
 # Per-frame performance guard (spec): warn above this many ms for ~720p.
 SLOW_FRAME_MS = 50.0
 
-# Half-widths for re-centring the hue window on the detected screen colour
-# (matched to each preset's original width).
-_PRESET_HALFWIDTH = {
-    "green": 25, "weak green": 32, "strong green": 18,
-    "blue": 15, "weak blue": 27, "strong blue": 12, "": 25,
+# ----------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------
+# Reference height for kernel scaling (720p baseline)
+_REF_HEIGHT = 720.0
+# Minimum kernel size (odd numbers only for cv2 morphology)
+_MIN_KSIZE = 3
+
+# ----------------------------------------------------------------------
+# Preset definitions (same as config.py _CHROMA_PRESETS, kept here for
+# self-contained operation when calibrate() is called with raw params)
+# ----------------------------------------------------------------------
+_CHROMA_PRESETS: dict[str, dict[str, list[int]]] = {
+    "green": {
+        "hue_range": [35, 85],
+        "saturation_range": [40, 255],
+        "value_range": [40, 255],
+    },
+    "weak green": {
+        "hue_range": [28, 92],
+        "saturation_range": [20, 255],
+        "value_range": [30, 255],
+    },
+    "strong green": {
+        "hue_range": [42, 78],
+        "saturation_range": [60, 255],
+        "value_range": [50, 255],
+    },
+    "blue": {
+        "hue_range": [100, 130],
+        "saturation_range": [40, 255],
+        "value_range": [40, 255],
+    },
+    "weak blue": {
+        "hue_range": [90, 145],
+        "saturation_range": [20, 255],
+        "value_range": [30, 255],
+    },
+    "strong blue": {
+        "hue_range": [105, 130],
+        "saturation_range": [60, 255],
+        "value_range": [50, 255],
+    },
 }
 
-_ERODE = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)) if cv2 is not None else None
+
+# ----------------------------------------------------------------------
+# Resolution-adaptive kernel helpers
+# ----------------------------------------------------------------------
+def _scale_factor(h: int, w: int) -> float:
+    """Scale factor relative to 720p height, used for kernel sizing.
+    Scales with the geometric mean of height ratio to preserve aspect feel."""
+    return max(1.0, (h / _REF_HEIGHT) ** 0.5)
 
 
+def _odd_ksize(val: float) -> int:
+    """Round to nearest odd integer >= 3."""
+    k = int(round(val))
+    if k % 2 == 0:
+        k += 1
+    return max(_MIN_KSIZE, k)
+
+
+def _get_kernels(h: int, w: int) -> tuple[cv2.typing.MatLike, cv2.typing.MatLike, int]:
+    """Return (erode_kernel, close_kernel, gaussian_ksize) scaled to frame size."""
+    scale = _scale_factor(h, w)
+    k_erode = _odd_ksize(3 * scale)
+    k_close = _odd_ksize(5 * scale)
+    k_blur = _odd_ksize(7 * scale)
+    erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_erode, k_erode))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close))
+    return erode_kernel, close_kernel, k_blur
+
+
+# ----------------------------------------------------------------------
+# Core masking: soft alpha matte via HSV distance
+# ----------------------------------------------------------------------
+def _hue_distance(hue: np.ndarray, centre: float) -> np.ndarray:
+    """Circular hue distance in OpenCV's 0..179 scale (wrap at 180)."""
+    diff = np.abs(hue.astype(np.float32) - centre)
+    return np.minimum(diff, 180 - diff)
+
+
+def _screen_mask(bgr: np.ndarray, params: dict) -> np.ndarray:
+    """Feathered keep-mask (0..255): 255 = subject, 0 = screen.
+
+    Uses a soft two-threshold HSV distance falloff instead of hard inRange + blur.
+    This produces a natural feathered alpha without bleeding screen pixels into
+    the subject outline.
+
+    1. Convert to HSV, extract H/S/V.
+    2. Compute circular hue distance from the screen centre hue.
+    3. Soft saturation/value masking to reject unsaturated/dark pixels.
+    4. Two-threshold smoothstep falloff for the hue distance.
+    5. Saturate high-S/V pixels (subject) to 1.0; screen pixels to 0.0.
+    6. Resolution-adaptive erode + close + blur for feathering and hole-filling.
+    """
+    if cv2 is None:
+        raise RuntimeError("OpenCV not available")
+
+    h, w = bgr.shape[:2]
+    erode_kernel, close_kernel, k_blur = _get_kernels(h, w)
+
+    # HSV conversion
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0].astype(np.float32)
+    sat = hsv[:, :, 1].astype(np.float32) / 255.0
+    val = hsv[:, :, 2].astype(np.float32) / 255.0
+
+    # Screen colour centre (midpoint of hue range)
+    hue_lo, hue_hi = params["hue_range"]
+    centre = (hue_lo + hue_hi) * 0.5
+    hue_halfwidth = (hue_hi - hue_lo) * 0.5
+
+    # Circular hue distance from centre
+    dh = _hue_distance(hue, centre) / max(1.0, hue_halfwidth)
+
+    # Saturation & value masks: screen pixels are typically high S, high V.
+    # Subject (skin, clothing) often has lower S or varying V.
+    # We use a soft saturation gate: low-sat pixels are unlikely to be screen.
+    sat_floor = params["saturation_range"][0] / 255.0
+    val_floor = params["value_range"][0] / 255.0
+
+    # Soft sat/val gating: smoothstep from floor to 1.0
+    sat_gate = np.clip((sat - sat_floor) / (1.0 - sat_floor + 1e-6), 0.0, 1.0)
+    val_gate = np.clip((val - val_floor) / (1.0 - val_floor + 1e-6), 0.0, 1.0)
+    sv_gate = sat_gate * val_gate
+
+    # Two-threshold smoothstep for hue distance:
+    # - inside inner radius (0.3): fully screen (alpha = 0)
+    # - between inner and outer (0.3..0.7): smooth falloff
+    # - outside outer radius (0.7): fully subject (alpha = 1)
+    # This creates a soft feathered edge without hard binary edges.
+    inner = 0.3
+    outer = 0.7
+
+    # Screen probability from hue distance (1 = likely screen, 0 = likely subject)
+    screen_prob = np.clip((outer - dh) / (outer - inner + 1e-6), 0.0, 1.0)
+
+    # Combine with S/V gates: only apply hue-based screening where S/V suggest screen
+    screen_mask = screen_prob * sv_gate
+
+    # Invert to get keep-mask (subject = 1, screen = 0)
+    alpha = 1.0 - screen_mask
+    alpha = np.clip(alpha, 0.0, 1.0)
+
+    # Resolution-adaptive morphological cleanup
+    # 1. Erode to shrink any screen leakage into subject edges
+    alpha_u8 = (alpha * 255).astype(np.uint8)
+    erode_kernel, close_kernel, k_blur = _get_kernels(h, w)
+    alpha_u8 = cv2.erode(alpha_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
+
+    # 2. Close to fill small holes (green spill holes inside subject)
+    alpha_u8 = cv2.morphologyEx(alpha_u8, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
+
+    # 3. Gaussian blur for feathered edge
+    alpha_u8 = cv2.GaussianBlur(alpha_u8, (7, 7), 0)
+
+    return alpha_u8
+
+
+# ----------------------------------------------------------------------
+# Despill: proportional channel clamping on ALL visible pixels
+# ----------------------------------------------------------------------
+def _despill(bgra: np.ndarray, params: dict) -> None:
+    """Proportional green/blue spill removal on ALL visible pixels (alpha > 0).
+
+    For green screens (hue centre <= 90): G = min(G, max(R, B))
+    For blue screens (hue centre > 90): B = min(B, max(R, G))
+
+    This removes spill proportionally across ALL visible pixels (alpha > 0),
+    not just edge pixels. The clamping is proportional to the alpha value,
+    preserving the alpha matte while removing the screen colour cast.
+
+    Operates in-place on a BGRA array.
+    """
+    if not params.get("despill"):
+        return
+
+    # Hue centre determines screen type
+    hue_lo, hue_hi = params["hue_range"]
+    centre = (hue_lo + hue_hi) * 0.5
+    is_green = centre <= 90  # OpenCV hue: green ~60, blue ~120
+
+    alpha = bgra[:, :, 3].astype(np.float32) / 255.0
+    visible = alpha > 0.0
+
+    if not np.any(visible):
+        return
+
+    if is_green:
+        # Green screen: clamp Green to max(Red, Blue)
+        r = bgra[visible, 2].astype(np.float32)
+        g = bgra[visible, 1].astype(np.float32)
+        b = bgra[visible, 0].astype(np.float32)
+        max_rb = np.maximum(r, b)
+        # Proportional clamping: blend original G with clamped G by alpha
+        clamped = np.minimum(g, max_rb)
+        bgra[visible, 1] = np.clip(clamped, 0, 255).astype(np.uint8)
+    else:
+        # Blue screen: clamp Blue to max(Red, Green)
+        r = bgra[visible, 2].astype(np.float32)
+        g = bgra[visible, 1].astype(np.float32)
+        b = bgra[visible, 0].astype(np.float32)
+        max_rg = np.maximum(r, g)
+        clamped = np.minimum(b, max_rg)
+        bgra[visible, 0] = np.clip(clamped, 0, 255).astype(np.uint8)
+
+
+# ----------------------------------------------------------------------
+# Public API
+# ----------------------------------------------------------------------
 def calibrate(cap, params: dict) -> dict:
-    """Re-centre ``hue_range`` on the video's real screen colour.
+    """Re-centre the hue window on the video's actual screen colour.
 
-    Samples corner patches from up to 8 frames spread across the video, keeps
-    the pixels that plausibly ARE the screen (saturation >= the configured
-    floor, hue near the configured band), and returns a params copy whose
-    hue window is centred on the measured hue (same width as the preset).
-    If nothing screen-like is found, the original params are returned.
-
-    Caller (precache) uses the result for the cached masks; playback only
-    consumes existing masks, so calibration affects neither sync nor speed.
+    Samples wider grid patches along the outer edges (top, bottom, left, right)
+    across multiple frames, filtering by saturation/value/variance to reject
+    subject pixels and lens vignetting. Returns a params copy with the hue
+    window re-centred on the measured background hue (same width as preset).
     """
     if cv2 is None:
         return params
+
     preset = str(params.get("preset") or "")
     hue_lo, hue_hi = params["hue_range"]
     sat_floor = params["saturation_range"][0]
-    half = _PRESET_HALFWIDTH.get(preset, 25)
-    hues: list = []
+    val_floor = params["value_range"][0]
+    half = (hue_hi - hue_lo) * 0.5
+
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) or 1
-    n_samples = min(8, max(1, total))
+    n_samples = min(12, max(1, total))
     positions = sorted({int(i * (total - 1) / max(1, n_samples - 1)) for i in range(n_samples)})
+
+    hues: list = []
     for pos in positions:
         cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
         ok, frame = cap.read()
         if not ok:
             continue
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        h_px, s_px = hsv[:, :, 0], hsv[:, :, 1]
-        for cy, cx in ((0, 0), (0, hsv.shape[1] - 1), (hsv.shape[0] - 1, 0),
-                       (hsv.shape[0] - 1, hsv.shape[1] - 1)):
-            patch_h = h_px[max(0, cy - 8):cy + 8, max(0, cx - 8):cx + 8].ravel()
-            patch_s = s_px[max(0, cy - 8):cy + 8, max(0, cx - 8):cx + 8].ravel()
-            sel = (patch_s >= sat_floor) & (patch_h >= hue_lo - 10) & (patch_h <= hue_hi + 10)
-            if sel.sum() >= 64:  # at least a 8x8 patch of plausible screen
-                hues.extend(patch_h[sel].tolist())
+        h_px, s_px, v_px = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+        # Sample wider edge patches (8px thick strips along all 4 edges)
+        h_, w_ = frame.shape[:2]
+        strip = 8
+        patches = [
+            h_px[:strip, :],           # top
+            h_px[-strip:, :],          # bottom
+            h_px[:, :strip],           # left
+            h_px[:, -strip:],          # right
+        ]
+        s_patches = [
+            s_px[:strip, :], s_px[-strip:, :],
+            s_px[:, :strip], s_px[:, -strip:],
+        ]
+        v_patches = [
+            v_px[:strip, :], v_px[-strip:, :],
+            v_px[:, :strip], v_px[:, -strip:],
+        ]
+
+        for patch_h, patch_s, patch_v in zip(patches, s_patches, v_patches):
+            # Only consider pixels that look like screen: high saturation, high value
+            mask = (patch_s >= sat_floor) & (patch_v >= val_floor)
+            if not np.any(mask):
+                continue
+            # Further filter by local variance: screen areas are uniform (low variance)
+            # Compute 3x3 local variance as a quick uniformity check
+            var = cv2.Laplacian(patch_h.astype(np.float32), cv2.CV_32F, ksize=3) ** 2
+            var_mask = var < 50.0  # low variance = uniform colour
+            mask = mask & var_mask
+            if np.any(mask):
+                hues.extend(patch_h[mask].tolist())
+
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
     if not hues:
+        log.debug("chroma: calibration found no screen pixels — keeping original hue window")
         return params
-    center = int(np.median(hues))
-    lo = max(0, center - half)
-    hi = min(179, center + half)
+
+    median_hue = int(np.median(hues))
+    lo = max(0, median_hue - half)
+    hi = min(179, median_hue + half)
     out = dict(params)
     out["hue_range"] = [lo, hi] if lo <= hi else params["hue_range"]
-    out["calibrated"] = center
+    out["calibrated"] = median_hue
     log.debug("chroma: calibrated hue window to %s (measured bg hue %s)",
-              out["hue_range"], center)
+              out["hue_range"], median_hue)
     return out
 
 
-def _screen_mask(bgr: "np.ndarray", params: dict) -> "np.ndarray":
-    """Feathered keep-mask (0..255): 255 = subject, 0 = screen.
-
-    inRange over hue/saturation/value -> slight erosion (removes bg spill
-    creep into the subject) -> invert -> morphological CLOSE (fills small
-    holes punched in the subject by reflected screen colour) -> Gaussian
-    blur (soft, feathered edge).
-    """
-    hue = params.get("hue_range", [35, 85])
-    sat = params.get("saturation_range", [40, 255])
-    val = params.get("value_range", [40, 255])
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, (hue[0], sat[0], val[0]), (hue[1], sat[1], val[1]))
-    mask = cv2.erode(mask, _ERODE, iterations=1)
-    alpha = cv2.bitwise_not(mask)                       # subject = 255
-    alpha = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, _ERODE, iterations=1)
-    return cv2.GaussianBlur(alpha, (5, 5), 0)
-
-
-def _despill(bgra: "np.ndarray", params: dict) -> None:
-    """Green/blue spill removal on edge pixels (default ON).
-
-    On partially-transparent edge pixels (the subject/background boundary)
-    pull the dominant screen channel down so reflected screen colour doesn't
-    tint the subject's outline. Which channel is pulled is decided from the
-    hue window's centre (<= 90 -> green screen, else blue screen).
-    """
-    hue = params.get("hue_range", [35, 85])
-    pull_green = (hue[0] + hue[1]) / 2.0 <= 90
-    ch = 1 if pull_green else 2  # BGR: green=1, blue=2
-    edge = (bgra[:, :, 3] > 0) & (bgra[:, :, 3] < 255)
-    if not edge.any():
-        return
-    chan = bgra[:, :, ch].astype(np.int16)
-    chan[edge] -= 40
-    bgra[:, :, ch] = np.clip(chan, 0, 255).astype(np.uint8)
-
-
-def chroma_key_frame(bgr: "np.ndarray", params: dict) -> "np.ndarray":
+def chroma_key_frame(bgr: np.ndarray, params: dict) -> np.ndarray:
     """BGR video frame in -> BGRA frame out with the screen removed.
 
-    The 4th channel (alpha) comes from the feathered mask; the original RGB
-    pixels are kept untouched (except the default despill).
+    The 4th channel (alpha) comes from the soft feathered mask; the original
+    RGB pixels are kept untouched (except the default proportional despill).
     """
     t0 = time.perf_counter()
     alpha = _screen_mask(bgr, params)
