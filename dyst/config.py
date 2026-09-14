@@ -89,6 +89,7 @@ DEFAULTS: Dict[str, Any] = {
     "autostart": False,
     "show_console": False,        # true = visible log terminal; false = hidden background
     "debug": False,
+    "kill_hotkey": "ctrl+shift+alt+k",  # global hotkey to terminate the app (Windows only; empty = disabled)
 }
 
 # Per-key validators. Each returns True if the value is acceptable.
@@ -235,6 +236,7 @@ _TOP_LEVEL_RULES = {
     "autostart": (_is_bool, DEFAULTS["autostart"]),
     "show_console": (_is_bool, DEFAULTS["show_console"]),
     "debug": (_is_bool, DEFAULTS["debug"]),
+    "kill_hotkey": (lambda v: isinstance(v, str), DEFAULTS["kill_hotkey"]),
 }
 
 

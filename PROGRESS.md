@@ -1028,6 +1028,26 @@ all PASS.
 
 - None.
 
+8. **BUG FIX (user follow-up: "audio/video plays very slow now"):** the AV1 audio-sync catch-up loop in `_next_frame` chroma-keyed **every** frame it decoded to catch up with the audio clock. Keying costs ~50–60 ms/frame at 720p but the clock advances at the video's real fps (60 → 16.7 ms/frame budget), so it could never catch up: each tick decoded+keyed a growing burst (GUI blocked for seconds), the backlog snowballed, and playback crawled. Before the audio fix the sync branch never engaged (player not playing), which is why it "played smoothly" back then. Fix: skipped frames are **raw-decoded only** (no keying/QImage) — only the frame actually displayed gets keyed — and decodes are capped at 30/tick so a tick can never block for long. Additionally, when the **extracted embedded audio** ends (`_audio_end`, only when `_temp_audio` is set and a capture is active — sidecar audio deliberately excluded since it may outlive the video), the visual finishes immediately per the locked "videos end instantly at media end" decision. Verified instrumented: loaded 0.24 s → EndOfMedia 2.16 s (media ~1.75 s at true speed) → overlay closed 2.18 s.
+
+### Kill switch — global hotkey (dead man's switch) ✅ DONE
+
+Feature request: when the app runs in the background and overlays go haywire (e.g. bad config causes rapid spawning), the user may not be able to reach the tray to quit. Added a configurable global keyboard shortcut that force-terminates the app.
+
+- **`kill_hotkey` config key** (default `"ctrl+shift+alt+k"`, empty string = disabled): registered via Win32 `RegisterHotKey` (`dyst/hotkey.py`). When pressed, fires the callback (typically `app.quit()`). Uses `QTimer` polling `GetAsyncKeyState` every 50ms with edge detection (avoids PySide6 native event filter reliability issues). Cleaned up on exit (unregister + stop timer + disable filter). Windows only, no-op elsewhere. No extra dependencies (uses ctypes).
+- **Files touched:** `dyst/hotkey.py` (new module), `dyst/config.py` (`kill_hotkey` default + validator), `main.py` (register at startup, unregister on exit), `config.json`, `config_template.json` (key + hint), `AGENTS.md` (§8 schema + §6 audio note), `PLAN.md` (Phase 5 task), `PROGRESS.md`.
+- **Verified:** `parse_hotkey` correctly parses combos and rejects empty/invalid strings; `register_hotkey("")` returns False (disabled); `py_compile` clean on all files; config load returns `kill_hotkey: ctrl+shift+alt+k`.
+
+#### BUG FIX — kill switch never fired (user report: "not working when running `python main.py --daemon`")
+
+The hotkey was dead in **every** mode, not just `--daemon`. Two independent faults; fixing only the first still left it broken:
+
+1. **Cleanup ran before the event loop.** `main.py`/`_run_qt` had the `unregister_hotkey(); hotkey_filter.setEnabled(False)` teardown block placed **before** `return app.exec()`, so it executed at end of *setup*. `unregister_hotkey()` stopped the poll timer, called `UnregisterHotKey`, and nulled `_registered`/`_callback` — `_poll_keys()` then returned on its first line forever. `app.log` showed `registered` and `unregistered` in the same millisecond, before `daemon: running`. Fix: move the teardown into a `finally:` around `app.exec()` so it runs on real exit.
+2. **The poll timer was garbage-collected.** `register_hotkey()` declared only `global _registered, _callback`, so `_timer = QTimer()` bound a **local** name; the parentless QTimer was dropped when the function returned and never ticked (`global _prev_keys` was also missing, making its reset a no-op). Fix: `global _registered, _callback, _timer, _prev_keys`.
+
+- **Files touched:** `main.py` (`_run_qt` teardown), `dyst/hotkey.py` (global declaration), `config_template.json` (added the missing top-level `kill_hotkey` key — §12.4 drift: only the hint existed), `PROGRESS.md`.
+- **Verified:** synthetic keys-down through the real `_poll_keys` → callback fired, `app.quit()` called **exactly once** (edge detection works), `main(['--daemon'])` returned 0 at t=0.879 s (≈50 ms after the loop started); negative control with `GetAsyncKeyState → 0` ran the full 6 s without quitting; `py_compile` clean on `main.py` + `dyst/*.py`.
+
 ## Next steps
 
 1. **User: run `.venv/Scripts/python main.py --play "media/videos/Elephant Green Screen Effect Meme (But Its Actually Green Screen) [Z_Ik77To2T0].webm"` on the real desktop** to eyeball the restored chroma key (cache is already warm — instant start).

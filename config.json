@@ -1,6 +1,6 @@
 {
   "_note": "Key order groups: Core loop -> Media & playback -> Audio -> Display & layout -> Chroma key -> System. Related keys stay adjacent (custom-layout keys together, playback caps next to speed/pitch). See config_template.json for hints on every key.",
-  "tick_seconds": 0.1,
+  "tick_seconds": 1,
   "odds": 3,
   "max_concurrent": 5,
   "reroll_in_same_tick": false,
@@ -17,7 +17,7 @@
   "speed_pitch": 0,
   "max_playback_height": 480,
   "max_playback_fps": 24,
-  "volume": 0.3,
+  "volume": 1,
   "monitor": "primary",
   "mode": "fit",
   "opacity": 1.0,
@@ -31,5 +31,6 @@
   "chroma_key": "off",
   "autostart": false,
   "show_console": false,
-  "debug": true
+  "debug": true,
+  "kill_hotkey": "ctrl+shift+alt+k"
 }

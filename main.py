@@ -19,6 +19,7 @@ import signal
 import sys
 
 from dyst import __version__, chroma as chroma_mod, config as cfg, media, precache as precache_mod
+from dyst.hotkey import register_hotkey, unregister_hotkey, HotkeyFilter
 from dyst.media import _parse_txt_settings, _validate_settings
 
 log = logging.getLogger("dyst.main")
@@ -511,6 +512,18 @@ def _run_qt(config: dict, args) -> int:
 
     app = QApplication(sys.argv[:1])
 
+    # Global hotkey kill switch (dead man's switch): register if configured.
+    # Empty string = disabled. Windows only (no-op on other platforms).
+    kill_hotkey = config.get("kill_hotkey", "")
+    hotkey_filter = HotkeyFilter()
+    # On non-Windows, install the native event filter (no-op on Windows —
+    # the hotkey is polled via QTimer instead).
+    if sys.platform != "win32":
+        app.installNativeEventFilter(hotkey_filter)
+    _hotkey_registered = register_hotkey(kill_hotkey, app.quit)
+    if _hotkey_registered:
+        log.info("main: kill hotkey active (%s)", kill_hotkey)
+
     if args.play:
         path = args.play
         kind = media.kind_of(path)
@@ -572,7 +585,14 @@ def _run_qt(config: dict, args) -> int:
     elif args.daemon:
         _run_daemon(app, config)
 
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        # Cleanup hotkey on exit — MUST run after the event loop, otherwise
+        # the kill switch unregisters itself before it can ever fire.
+        if _hotkey_registered:
+            unregister_hotkey()
+            hotkey_filter.setEnabled(False)
 
 
 def main(argv=None) -> int:

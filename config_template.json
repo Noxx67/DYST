@@ -33,6 +33,7 @@
   "autostart": false,
   "debug": false,
   "show_console": false,
+  "kill_hotkey": "ctrl+shift+alt+k",
   "_hints": {
     "tick_seconds": "seconds between rolls (must be > 0). Default 1.0.",
     "odds": "1 in N chance per tick (must be >= 1). Default 1000 = 0.1% per tick.",
@@ -51,7 +52,7 @@
     "speed_pitch": "PER-FILE only (media sidecar, NOT config.json): PER-FILE combined speed+pitch (>0): OVERRIDES per-file/global speed and pitch (sets both). 0 = use them individually.",
     "max_playback_height": "GLOBAL + PER-FILE (media sidecar — same key name overrides the global): cap the height (px) media is worked at — decode, chroma-key, copy and paint all happen at this size, so taller videos/GIFs are downscaled keeping aspect BEFORE processing (massive CPU/RAM win for high-res clips; slight softness on upscale, invisible for scare clips). 0 = no cap (native). Default 480. Changing it rebuilds the precache.",
     "max_playback_fps": "GLOBAL + PER-FILE (media sidecar — same key name overrides the global): cap the effective playback framerate (fps) of videos. Sources above it are frame-sampled (every Nth frame presented); duration and audio are untouched. Applies to the OpenCV/chroma/AV1 playback paths (GIFs ignore it; QtMultimedia decodes internally). 0 = no cap (native). Default 30. Changing it rebuilds the precache.",
-    "volume": "GLOBAL + PER-FILE (media sidecar — same key name overrides the global): volume/gain for THIS media 0.0-5.0 (1.0 = 100%%). Final volume = global * per-file, so values > 1 BOOST (e.g. 2 = twice as loud). Per-file ignored with no audio.",
+    "volume": "GLOBAL + PER-FILE (media sidecar — same key name multiplies with the global, NOT replaces it): volume/gain for THIS media 0.0-5.0 (1.0 = 100%%). Final volume = global * per-file, so values > 1 BOOST (e.g. 2 = twice as loud). Per-file ignored with no audio.",
     "monitor": "which monitor: 'primary' or a 0-based monitor index. Default 'primary'.",
     "mode": "PER-FILE only (media sidecar, NOT config.json): how this media covers the screen: fit | stretch | cover-height | cover-width | custom. Per-file wins over global mode.",
     "opacity": "PER-FILE only (media sidecar, NOT config.json): this media's overlay transparency 0.0-1.0. Default 1.0.",
@@ -67,6 +68,7 @@
     "autostart": "true = register Windows Run key on every launch (auto-starts at login, silent). false + boot launch (Run key present + --autostart flag) = remove key and exit immediately. false + manual launch = clear stale key, keep running.",
     "debug": "verbose logging to app.log. Default false.",
     "show_console": "true = launch with a visible log terminal; false = hidden background (default). When false on Windows + frozen, the console is detached after config load.",
+    "kill_hotkey": "GLOBAL only: keyboard shortcut to force-terminate the app (Windows only). Format: 'ctrl+shift+alt+k' (modifier+key joined by '+'). Modifiers: ctrl, shift, alt, win. Key: a-z, 0-9, f1-f12. Empty string = disabled. Dead man's switch when overlays go haywire and tray is unreachable.",
     "weight": "PER-FILE only (media sidecar, NOT config.json): PER-FILE pick probability (>= 0; floats; default 1). 2 = twice as likely, 0.5 = half. Chance = weight/total_weight. 0 = never picked (warning logged). Works in ANY mode.",
     "chroma": "PER-FILE only (media sidecar, NOT config.json): PER-FILE true/false override of the global chroma-key flag: true = filter THIS file, false = skip even when global chroma is on (files with real alpha). Default true."
   },

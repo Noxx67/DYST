@@ -1,0 +1,6 @@
+high res videos lag the shit out of the player. somewhat fixed?
+the video player is very sluggish when chroma key is added and when the video has too much green.   
+
+some windows pop up with a terminal before. FIXED
+
+green screen isnt that good. FIXED
