@@ -110,6 +110,26 @@ def resolve_scale(settings: dict, config: dict) -> tuple[float, float]:
     return _r(sx, s_resolved), _r(sy, s_resolved)
 
 
+def resolve_playback_caps(settings: dict, config: dict) -> tuple[int, float]:
+    """Resolve the effective playback caps (max_playback_height,
+    max_playback_fps) from per-file settings + config. Per-file sidecar
+    wins over global; 0 = no cap; defaults are the config ones (480/30).
+    The SAME values must be used for the precache call and the overlay, so
+    the cached alpha-mask geometry matches playback exactly."""
+    def _v(key: str, default):
+        val = (settings or {}).get(key)
+        if val is None:
+            val = config.get(key)
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            v = default
+        return int(v) if key == "max_playback_height" else v
+
+    return (_v("max_playback_height", 480),
+            _v("max_playback_fps", 30.0))
+
+
 def get_base_dir() -> str:
     """Returns the directory of the .exe when compiled, or main.py when running in dev."""
     if getattr(sys, "frozen", False):
@@ -201,6 +221,10 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
         chroma_key_cfg = cfg.chroma_preset_cfg(per_preset, chroma_key_cfg)
     use_chroma = chroma_mod.should_apply(item.path, chroma_key_cfg, settings)
     chroma_params = chroma_key_cfg if use_chroma else None
+    # Playback caps (resolution/fps) — per-file sidecar can override the
+    # global values; the same values must reach the precache and the overlay
+    # so cached masks and decoded frames share a geometry.
+    max_pb_h, max_pb_fps = resolve_playback_caps(settings, config)
     log.debug("chroma: %s for %s (enabled=%s, preset=%r, hue=%s, sat=%s, val=%s, despill=%s)",
               "ON" if use_chroma else "OFF",
               os.path.basename(item.path),
@@ -214,14 +238,16 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
     cached = None
     if item.kind == "video":
         if use_chroma:
-            cached = precache_mod.cache_ready(item.path, chroma_key_cfg)
+            cached = precache_mod.cache_ready(item.path, chroma_key_cfg,
+                                              max_pb_h, max_pb_fps)
             if cached is None and pre:
                 log.info("precache: preprocessing %s (first use with the "
                          "current chroma settings) — one-time",
                          os.path.basename(item.path))
                 cached = precache_mod.ensure(
                     item.path, chroma_key_cfg,
-                    progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n))
+                    progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n),
+                    max_height=max_pb_h, max_fps=max_pb_fps)
             kind = "video-chroma-cached" if cached else "video-chroma"
             if cached:
                 log.debug("precache: cache HIT for %s — playing from cached "
@@ -287,7 +313,11 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
                     max_duration=max_duration,
                     speed=speed,
                     pitch=pitch,
-                    sidecar_audio=item.sidecar_audio):
+                    sidecar_audio=item.sidecar_audio,
+                    max_playback_height=max_pb_h,
+                    max_playback_fps=max_pb_fps,
+                    end_on_audio_end=settings.get("end_on_audio_end",
+                                                  config.get("end_on_audio_end", False))):
         return None
     win.show()
     win.start()
@@ -387,11 +417,12 @@ def _run_daemon(app, config: dict) -> None:
             for item in entry["items"]:
                 _try_spawn(item)
 
-    def _precache_worker(item: media.MediaItem, cfg: dict, sig) -> None:
+    def _precache_worker(item: media.MediaItem, cfg: dict, sig, max_h: int, max_fps: float) -> None:
         try:
             precache_mod.ensure(
                 item.path, cfg.get("chroma_key", {}),
-                progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n))
+                progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n),
+                max_height=max_h, max_fps=max_fps)
         finally:
             log.debug("precache: worker thread done, emitting completion")
             sig.done.emit()  # queued -> GUI thread
@@ -403,12 +434,17 @@ def _run_daemon(app, config: dict) -> None:
             return False
         settings = item.settings or {}
         chroma_key_cfg = config.get("chroma_key", {})
+        # Same playback caps the overlay will use — the precache must be
+        # built with them so mask geometry matches playback.
+        max_pb_h, max_pb_fps = resolve_playback_caps(settings, config)
         if (item.kind == "video"
                 and chroma_mod.should_apply(item.path, chroma_key_cfg, settings)
-                and precache_mod.cache_ready(item.path, chroma_key_cfg) is None):
+                and precache_mod.cache_ready(item.path, chroma_key_cfg,
+                                             max_pb_h, max_pb_fps) is None):
             # First (or parallel) trigger(s) on an uncached chroma video:
             # pause the loop, preprocess once, spawn from cache afterwards.
-            key = precache_mod.cache_key(item.path, chroma_key_cfg)
+            key = precache_mod.cache_key(item.path, chroma_key_cfg,
+                                         max_pb_h, max_pb_fps)
             entry = precache_jobs.setdefault(key, {"items": [], "thread": None})
             if entry["thread"] is None:
                 if ticker_holder and ticker_holder[0]:
@@ -423,7 +459,8 @@ def _run_daemon(app, config: dict) -> None:
                 # event is delivered and the completion callback never runs.
                 entry["sig"] = sig
                 entry["thread"] = threading.Thread(
-                    target=_precache_worker, args=(item, config, sig), daemon=True)
+                    target=_precache_worker,
+                    args=(item, config, sig, max_pb_h, max_pb_fps), daemon=True)
                 entry["thread"].start()
             if item not in entry["items"]:
                 entry["items"].append(item)
@@ -508,7 +545,9 @@ def _run_qt(config: dict, args) -> int:
                           "mode", "volume", "weight", "opacity", "chroma",
                           "position_x", "position_y", "scale_x", "scale_y", "scale",
                           "flip_h", "flip_v", "rotation", "max_duration",
-                          "speed", "pitch", "speed_pitch"):
+                          "speed", "pitch", "speed_pitch",
+                          "max_playback_height", "max_playback_fps",
+                          "end_on_audio_end"):
                     if k in raw and raw[k] is not None:
                         existing[k] = raw[k]
             break  # Found settings, stop looking

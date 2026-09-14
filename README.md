@@ -66,12 +66,15 @@ with a warning, never crash the app.
 
   "media_folder": "media",      // folder with images/ and videos/ subfolders
   "image_display_seconds": 1.0, // how long a still image stays up
+  "end_on_audio_end": false,   // images: disappear when the sidecar audio ends (ignores image_display_seconds; max_duration still applies)
   "fade_out_seconds": 0.2,      // fade-out duration at end of playback (renamed from fade_seconds)
   "fade_in_seconds": 0,         // fade-in before display (images/gifs); 0 = off
   "max_duration": 0,            // hard cap (seconds) on any overlay + its audio; 0 = no cap
   "speed": 1.0,                 // playback speed multiplier (>0): videos/gifs/audio/image display + fades
   "pitch": 1.0,                 // audio pitch multiplier (>0): sidecar + audio-bearing media
   "speed_pitch": 0,             // combined speed+pitch: >0 sets BOTH and overrides speed/pitch; 0 = off
+  "max_playback_height": 480,  // cap decode/key/paint height (px): taller videos/GIFs are downscaled keeping aspect (stable playback for high-res clips); 0 = native
+  "max_playback_fps": 30,      // cap effective playback fps (videos; frame-sampled, audio untouched); 0 = native
 
   "monitor": "primary",         // which screen: "primary" or 0-based index
   "mode": "fit",                // how media covers the screen: fit (default) | stretch | cover-height | cover-width | custom
@@ -85,7 +88,7 @@ with a warning, never crash the app.
   "flip_v": false,             // mirror vertically
   "rotation": 0,               // rotation in degrees (around the media's center)
 
-  "volume": 0.8,               // master volume 0.0–1.0
+  "volume": 0.8,               // master volume/gain 0.0–5.0 (1.0 = 100%; >1 boosts)
 
   "download_max_height": 1080,  // max video height (px) for the downloader
                                 // (scripts/download_videos.py reads this;
@@ -153,13 +156,16 @@ volume=0.8
 | `rotation` | any number (degrees, default `0`) | **Custom mode only.** Rotate the media around its own center (e.g. `45`, `-90`, `180`). **Use string format for ranges:** `"0~360"`. |
 | `duration` | any number > 0 (seconds) | How long to show (images). Videos ignore it. |
 | `image_display_seconds` | any number > 0 (seconds) | Override for the global `image_display_seconds` (images only). Takes priority over `duration`. |
+| `end_on_audio_end` | `true` / `false` (default `false`) | **Images only** (global + per-file). When `true`, the image/GIF **ignores its display time entirely** and stays up until its sidecar audio **ends**, then fades out and closes. `max_duration` still applies (and wins over a long audio track). No sidecar audio = no effect — the normal display timer runs. |
 | `fade_out_seconds` | any number >= 0 (seconds) | Override for the global `fade_out_seconds` — how long the fade-out lasts. Image-only; ignored by videos. The old name `fade_seconds` is accepted as a deprecated alias (a warning asks you to rename it). |
 | `fade_in_seconds` | any number >= 0 (seconds, default `0`) | Override for the global `fade_in_seconds` — the image/GIF fades in from transparent **before** the display clock starts, so total lifetime = fade_in + display + fade_out. `0` = appears instantly. Image/GIF-only; ignored by videos. |
-| `volume` | 0.0 – 1.0 | Volume for that file (multiplied with the global `volume`). |
+| `volume` | 0.0 – 5.0 (default `0.8`) | Volume/gain for that file (multiplied with the global `volume`). `1.0` = 100% (same as global), `2.0` = twice as loud. Values above 1.0 boost; final = `global * per-file`, capped at 5.0. |
 | `weight` | any number >= 0 (default `1`; floats allowed) | How likely this media is **picked** by the random trigger (per-file; works in **any** `mode`). `2` = twice as likely as a weight-`1` file, `0.5` = half as likely. `0` = **never picked** (a warning is logged: "…will NOT show (never picked)"). The chance is `weight / total_weight` across all media — e.g. 3 files where one has `weight: 2` → that one gets 2/4 = 50%, the other two 1/4 = 25% each. If every file has weight `0`, nothing is picked at all. |
 | `speed` | any number > 0 (default `1`) | Playback speed multiplier for this file: video + its audio, GIFs, sidecar audio, **and** image display time + fades (all timings scale by 1/speed). `2` = twice as fast, `0.5` = half. With `pitch=1` the audio speeds up tape-style (pitch rises with speed); with `pitch != 1` speed and pitch are independent (audio is re-encoded via ffmpeg). **Use string format for ranges:** `"1.0~2.0"`. |
 | `pitch` | any number > 0 (default `1`) | Audio pitch multiplier for this file: sidecar audio and the audio of videos (the embedded track is extracted + re-encoded). `2` = an octave up, `0.5` = an octave down. Requires ffmpeg; independent of `speed`. **Use string format for ranges:** `"0.5~1.5"`. |
 | `speed_pitch` | any number >= 0 (default `0` = off) | Sets **both** speed and pitch at once (`speed = pitch = this value`, e.g. `1.5` = 1.5× speed AND 1.5× pitch). When set (per-file > global) it **overrides** the individual `speed`/`pitch` values — handy for randomizing both together later. `0`/absent = use `speed` and `pitch` separately. **Use string format for ranges:** `"1.0~2.0"`. |
+| `max_playback_height` | any number >= 0 (px, default `0` = no cap) | Per-file override of the global `max_playback_height`: cap the height THIS file is decoded/chroma-keyed/copied/painted at (videos + GIFs; still images ignore it). Taller sources are downscaled keeping aspect **before** processing — stable playback for high-res clips at the cost of a little softness. Changing it rebuilds that file's precache. |
+| `max_playback_fps` | any number >= 0 (fps, default `0` = no cap) | Per-file override of the global `max_playback_fps`: cap the effective playback framerate (videos only — OpenCV/chroma/AV1 paths). Sources above it are frame-sampled (every Nth frame presented); duration and audio are untouched. Changing it rebuilds that file's precache. |
 | `max_duration` | any number >= 0 (seconds, default `0`) | Hard cap for this file. When the timer runs out, the video/image/gif **and** its sidecar audio stop **immediately** and the overlay closes **instantly — no fade-out**. `0` = no cap (play naturally). Setting it smaller than `image_display_seconds` truncates the image display; smaller than a video's length cuts the video off early. Per-file wins over the global `max_duration` — use `0` per-file to disable a global cap for one file. **Use string format for ranges:** `"1.0~5.0"`. |
 | `chroma` | `true` / `false` (default: follow the global `chroma_key`) | Per-file override of the green/blue-screen removal. `false` = **skip keying** even when the global `chroma_key` is on (use it for assets that already have real alpha, or for videos that aren't green-screen at all — they'll also get faster, normal playback). `true` = force keying on this file. |
 

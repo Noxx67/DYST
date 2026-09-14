@@ -16,6 +16,13 @@ import tempfile
 
 log = logging.getLogger("dyst.ffmpeg_util")
 
+# On Windows, ffmpeg/ffprobe are console apps. When the parent process
+# has no console (frozen exe with show_console=false → FreeConsole, or
+# pythonw), a spawned subprocess opens a brand-new console window for
+# itself, producing the "terminal pops up before the overlay" flash.
+# CREATE_NO_WINDOW prevents that; 0 is a harmless no-op elsewhere.
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 
 def find_ffmpeg() -> str | None:
     """Locate ffmpeg: PATH first, then well-known WinGet install dirs
@@ -56,7 +63,8 @@ def extract_audio(video_path: str) -> str | None:
     tmp = tempfile.mktemp(suffix=".m4a", prefix="dyst_audio_")
     cmd = [ffmpeg, "-y", "-v", "error", "-i", video_path,
            "-vn", "-c:a", "aac", "-b:a", "160k", tmp]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                             creationflags=_CREATE_NO_WINDOW)
     if result.returncode != 0 or not os.path.isfile(tmp):
         log.warning("audio extraction failed for %s (%s)", video_path,
                     result.stderr.strip()[:120])
@@ -77,7 +85,8 @@ def _sample_rate(path: str) -> int:
     try:
         cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
                "-show_entries", "stream=sample_rate", "-of", "csv=p=0", path]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5,
+                             creationflags=_CREATE_NO_WINDOW)
         return int(out.stdout.strip().splitlines()[0])
     except (ValueError, IndexError, OSError, subprocess.TimeoutExpired):
         return 48000
@@ -123,7 +132,8 @@ def pitch_shift(path: str, pitch: float = 1.0, speed: float = 1.0) -> str | None
     tmp = tempfile.mktemp(suffix=".m4a", prefix="dyst_speed_")
     cmd = [ffmpeg, "-y", "-v", "error", "-i", path, "-vn", "-c:a", "aac",
            "-b:a", "160k", "-af", ",".join(filters), tmp]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                             creationflags=_CREATE_NO_WINDOW)
     if result.returncode != 0 or not os.path.isfile(tmp):
         log.warning("speed/pitch bake failed for %s (%s)", path,
                     result.stderr.strip()[:120])

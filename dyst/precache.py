@@ -70,23 +70,26 @@ def _fingerprint(params: dict) -> str:
     return hashlib.sha1(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:12]
 
 
-def cache_key(path: str, params: dict) -> str:
-    """Cache dir name: chroma settings + the media file's identity (path,
-    size, mtime) — changing either invalidates the cache automatically."""
+def cache_key(path: str, params: dict, max_height: int = 0, max_fps: float = 0) -> str:
+    """Cache dir name: chroma settings + playback caps + the media file's
+    identity (path, size, mtime) — changing any of them invalidates the
+    cache automatically. Playback caps are part of the identity because the
+    cached masks are built at the capped resolution/framerate."""
     st = os.stat(path)
     ident = "|".join([
         os.path.abspath(path), str(st.st_size), str(int(st.st_mtime)),
         _fingerprint(params), f"v{CACHE_VERSION}",
+        f"h{int(max_height or 0)}", f"f{float(max_fps or 0)}",
     ])
     return hashlib.sha1(ident.encode()).hexdigest()[:16]
 
 
-def cache_ready(path: str, params: dict) -> dict | None:
+def cache_ready(path: str, params: dict, max_height: int = 0, max_fps: float = 0) -> dict | None:
     """Return a cache handle {dir, masks, meta, audio} if a valid cache
     exists, else None (caller may then preprocess). The memmap is opened
     lazily (np.memmap reads pages on demand — no full-file load)."""
     try:
-        d = os.path.join(cache_root(), cache_key(path, params))
+        d = os.path.join(cache_root(), cache_key(path, params, max_height, max_fps))
         meta_path = os.path.join(d, "meta.json")
         if not os.path.isfile(meta_path):
             return None
@@ -125,15 +128,33 @@ def _extract_audio_into(tmp_dir: str, path: str) -> str:
         return ""
 
 
-def ensure(path: str, params: dict, progress=None) -> dict | None:
+def _resize_for_caps(frame, max_height: int):
+    """Downscale *frame* to the height cap keeping aspect (INTER_AREA for
+    quality downsampling). Returns (frame, (w, h)) — unchanged + original
+    dims when the cap is off or the frame is already small enough."""
+    h, w = frame.shape[:2]
+    if max_height <= 0 or h <= max_height:
+        return frame, (w, h)
+    h2 = max_height
+    w2 = max(2, int(round(w * max_height / h)))
+    return cv2.resize(frame, (w2, h2), interpolation=cv2.INTER_AREA), (w2, h2)
+
+
+def ensure(path: str, params: dict, progress=None, max_height: int = 0, max_fps: float = 0) -> dict | None:
     """Preprocess *path* with chroma *params* and cache the alpha masks.
 
-    Blocking call (≈50–60 ms per frame; callers should pause spawning or run
+    Blocking call (≈50–60 ms per 720p frame; callers should pause spawning or run
     it on a worker thread). `progress(done, total)` is invoked periodically.
     Returns the same handle as `cache_ready()` on success, None on failure
     (caller falls back to live keying). Existing cache is reused when valid.
-    """
-    hit = cache_ready(path, params)
+
+    max_height / max_fps: playback caps (same values the overlay uses). Frames
+    are downscaled to the height cap BEFORE keying and ONLY every Nth frame
+    (N = source_fps / max_fps, rounded up) is keyed — the cache is stored at
+    the capped resolution/sampled framerate, so playback can never be slower
+    than what the user asked for. meta["fps"] is the EFFECTIVE (sampled)
+    framerate the overlay presents at."""
+    hit = cache_ready(path, params, max_height, max_fps)
     if hit is not None:
         log.debug("precache: cache HIT for %s", os.path.basename(path))
         return hit
@@ -148,13 +169,19 @@ def ensure(path: str, params: dict, progress=None) -> dict | None:
     try:
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        key = cache_key(path, params)
+        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        # Frame-sampling step: present every Nth source frame so the
+        # playback framerate is capped (audio untouched, duration unchanged).
+        step = max(1, int(round(fps / max_fps))) if max_fps > 0 else 1
+        eff_fps = fps / step
+        key = cache_key(path, params, max_height, max_fps)
         d = os.path.join(cache_root(), key)
         tmp = d + ".tmp"
         shutil.rmtree(tmp, ignore_errors=True)
         os.makedirs(tmp, exist_ok=True)
         h = w = None
         count = 0
+        read_i = 0  # 1-based sequential read counter
         # Stream masks straight to disk — no giant RAM copy, so long clips
         # can be preprocessed too (np.memmap reads pages on demand later).
         with open(os.path.join(tmp, "masks.raw"), "wb") as raw:
@@ -162,12 +189,14 @@ def ensure(path: str, params: dict, progress=None) -> dict | None:
                 ok, frame = cap.read()
                 if not ok:
                     break
-                if h is None:
-                    h, w = frame.shape[:2]
+                read_i += 1
+                if read_i % step != 0:
+                    continue  # frame-sampling: skip non-presented source frames
+                frame, (w, h) = _resize_for_caps(frame, max_height)
                 raw.write(chroma._screen_mask(frame, key_params).tobytes())
                 count += 1
-                if progress and (count % 25 == 0 or count == total):
-                    progress(count, total if total > 0 else count)
+                if progress and (count % 25 == 0 or count == total // step):
+                    progress(count, (total // step) if total > 0 else count)
     except OSError as exc:
         log.warning("precache: failed preprocessing %s (%s)", path, exc)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -188,9 +217,13 @@ def ensure(path: str, params: dict, progress=None) -> dict | None:
             "size": st.st_size,
             "mtime": int(st.st_mtime),
             "fingerprint": _fingerprint(params),
-            "fps": fps,
+            "fps": eff_fps,
+            "frame_step": step,
+            "source_fps": fps,
             "frame_count": count,
             "h": h, "w": w,
+            "max_playback_height": max_height,
+            "max_playback_fps": max_fps,
             "audio": audio_name,
             "calibrated_hue_range": key_params.get("hue_range"),
         }
@@ -204,9 +237,11 @@ def ensure(path: str, params: dict, progress=None) -> dict | None:
         shutil.rmtree(tmp, ignore_errors=True)
         return None
 
-    log.info("precache: cached %d keyed frames for %s (%.1fs video%s, key %s)",
-             count, os.path.basename(path), count / fps,
-             " + cached audio" if audio_name else "", key)
+    log.info("precache: cached %d keyed frames for %s (%.1fs video%s, key %s, %dx%d @%.0ffps%s)",
+             count, os.path.basename(path), count / eff_fps,
+             " + cached audio" if audio_name else "", key,
+             w, h, eff_fps,
+             " [downscaled]" if max_height and h < src_h else "")
     masks_arr = np.memmap(os.path.join(d, "masks.raw"), dtype=np.uint8,
                           mode="r", shape=(count, h, w))
     return {"dir": d, "masks": masks_arr, "meta": meta,

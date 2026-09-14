@@ -88,7 +88,7 @@ def main() -> int:
         bad = {
             "tick_seconds": -3,          # <= 0
             "odds": "abc",               # non-numeric
-            "volume": 5,           # > 1
+            "volume": 6,           # > 5 (new cap)
             "monitor": "ultrawide",      # not 'primary'/int
             "max_concurrent": 2.5,       # non-integer
             "chroma_key": {"hue_range": [400, 500]},  # out of range

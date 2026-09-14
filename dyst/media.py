@@ -247,10 +247,10 @@ def _validate_settings(path: str, raw: dict) -> dict:
     if volume is not None:
         try:
             v = float(volume)
-            if 0.0 <= v <= 1.0:
+            if 0.0 <= v <= 5.0:
                 out["volume"] = v
             else:
-                log.warning("media: %s: volume must be 0..1", path)
+                log.warning("media: %s: volume must be 0..5 (1 = 100%%)", path)
         except (TypeError, ValueError):
             log.warning("media: %s: invalid volume %r", path, volume)
     weight = raw.get("weight")
@@ -298,6 +298,14 @@ def _validate_settings(path: str, raw: dict) -> dict:
                 log.warning("media: %s: image_display_seconds must be > 0", path)
         except (TypeError, ValueError):
             log.warning("media: %s: invalid image_display_seconds %r", path, image_display)
+    end_audio = raw.get("end_on_audio_end")
+    if end_audio is not None:
+        # Per-file override: images disappear when their sidecar audio ends.
+        b = _parse_bool(end_audio)
+        if isinstance(b, bool):
+            out["end_on_audio_end"] = b
+        else:
+            log.warning("media: %s: invalid 'end_on_audio_end' %r (use true/false) — ignored", path, end_audio)
     # fade_out_seconds (renamed from fade_seconds; the old name is accepted
     # as a deprecated alias so existing sidecars keep working).
     fade = raw.get("fade_out_seconds")
@@ -408,6 +416,24 @@ def _validate_settings(path: str, raw: dict) -> dict:
                     log.warning("media: %s: speed_pitch must be >= 0 (0 = off)", path)
             except (TypeError, ValueError):
                 log.warning("media: %s: invalid speed_pitch %r", path, sp)
+    # max_playback_height / max_playback_fps: per-file overrides of the
+    # global playback caps (0 = no cap). Videos + GIFs honour the height
+    # cap; the fps cap applies to videos (OpenCV/chroma/AV1 paths).
+    for key, (valid, desc) in {
+        "max_playback_height": (lambda v: v >= 0, ">= 0 (0 = no cap)"),
+        "max_playback_fps": (lambda v: v >= 0, ">= 0 (0 = no cap)"),
+    }.items():
+        val = raw.get(key)
+        if val is None:
+            continue
+        try:
+            v = float(val)
+            if valid(v):
+                out[key] = int(v) if key == "max_playback_height" else v
+            else:
+                log.warning("media: %s: %s must be %s", path, key, desc)
+        except (TypeError, ValueError):
+            log.warning("media: %s: invalid %s %r", path, key, val)
     # ---- custom mode layout (only used when mode == "custom") ----
     # position_x/y: normalized edge-pinning, -1..2, default 0.5 (centered).
     #   0 = left/top edge at the screen edge, 1 = right/bottom edge at the

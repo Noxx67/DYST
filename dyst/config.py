@@ -39,6 +39,7 @@ DEFAULTS: Dict[str, Any] = {
     # Media
     "media_folder": "media",
     "image_display_seconds": 1.0,
+    "end_on_audio_end": False,  # images: disappear when the sidecar audio ends (display timer still applies if shorter)
     "fade_out_seconds": 0.2,
     "fade_in_seconds": 0.0,  # fade-in before display (images/gifs); 0 = off
     "opacity": 1.0,          # overlay opacity 0.0-1.0 (1 = fully opaque)
@@ -46,6 +47,12 @@ DEFAULTS: Dict[str, Any] = {
     "speed": 1.0,            # playback speed multiplier (>0): videos/gifs/audio/images/fades
     "pitch": 1.0,            # audio pitch multiplier (>0): sidecar + audio-bearing media
     "speed_pitch": 0.0,      # combined speed+pitch: >0 sets BOTH and overrides speed/pitch; 0 = off
+    # Playback performance caps (0 = no cap)
+    "max_playback_height": 480,  # decode/key/paint height cap (px): taller videos/GIFs are
+                                  # downscaled keeping aspect BEFORE masking/copying/painting
+                                  # (cheap paint at the cost of sharpness) — 0 = native res
+    "max_playback_fps": 30,      # effective playback framerate cap (fps): videos above it are
+                                  # frame-sampled (audio untouched) — 0 = native framerate
     # Display
     "monitor": "primary",
     "mode": "fit",  # how media covers the screen (fit/stretch/cover-height/cover-width/custom)
@@ -58,7 +65,7 @@ DEFAULTS: Dict[str, Any] = {
     "flip_v": False,     # mirror vertically
     "rotation": 0.0,     # degrees (around the placed rect's center)
     # Audio
-    "volume": 0.8,              # master volume 0.0-1.0
+    "volume": 0.8,              # master volume/gain 0.0-5.0 (1.0 = 100%; >1 boosts)
     # Chroma key (green/blue screen removal)
     "chroma_key": {
         "enabled": True,
@@ -171,6 +178,11 @@ def _is_volume(v: Any) -> bool:
     return _is_num(v) and 0.0 <= v <= 1.0
 
 
+def _is_gain(v: Any) -> bool:
+    """Volume/gain value: 0.0..5.0 (1.0 = 100%, values above 1.0 boost)."""
+    return _is_num(v) and 0.0 <= v <= 5.0
+
+
 def _is_monitor(v: Any) -> bool:
     if isinstance(v, str):
         return v == "primary"
@@ -198,6 +210,7 @@ _TOP_LEVEL_RULES = {
     "reroll_in_same_tick": (_is_bool, DEFAULTS["reroll_in_same_tick"]),
     "media_folder": (lambda v: isinstance(v, str) and v != "", DEFAULTS["media_folder"]),
     "image_display_seconds": (_is_positive, DEFAULTS["image_display_seconds"]),
+    "end_on_audio_end": (_is_bool, DEFAULTS["end_on_audio_end"]),
     "fade_out_seconds": (_is_nonnegative, DEFAULTS["fade_out_seconds"]),
     "fade_in_seconds": (_is_nonnegative, DEFAULTS["fade_in_seconds"]),
     "opacity": (_is_volume, DEFAULTS["opacity"]),
@@ -205,6 +218,8 @@ _TOP_LEVEL_RULES = {
     "speed": (_is_positive, DEFAULTS["speed"]),
     "pitch": (_is_positive, DEFAULTS["pitch"]),
     "speed_pitch": (_is_nonnegative, DEFAULTS["speed_pitch"]),
+    "max_playback_height": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["max_playback_height"]),
+    "max_playback_fps": (_is_nonnegative, DEFAULTS["max_playback_fps"]),
     "monitor": (_is_monitor, DEFAULTS["monitor"]),
     "mode": (lambda v: isinstance(v, str) and v in ("fit", "cover-height", "cover-width", "stretch", "custom"), DEFAULTS["mode"]),
     "position_x": (lambda v: _is_num(v) and -1.0 <= v <= 2.0, DEFAULTS["position_x"]),
@@ -214,7 +229,7 @@ _TOP_LEVEL_RULES = {
     "flip_h": (_is_bool, DEFAULTS["flip_h"]),
     "flip_v": (_is_bool, DEFAULTS["flip_v"]),
     "rotation": (_is_num, DEFAULTS["rotation"]),
-    "volume": (_is_volume, DEFAULTS["volume"]),
+    "volume": (_is_gain, DEFAULTS["volume"]),
     "download_max_height": (lambda v: _is_num(v) and v > 0 and float(v).is_integer(), DEFAULTS["download_max_height"]),
     "rescan_seconds": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["rescan_seconds"]),
     "autostart": (_is_bool, DEFAULTS["autostart"]),

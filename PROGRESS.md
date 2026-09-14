@@ -948,6 +948,57 @@ test_phase0, test_phase1, test_chroma, `--play <elephant>` exit 0.
 `dyst/manager.py` stub deleted (overlay lifecycle + max_concurrent + audio are inlined
 in main.py/ticker.py — manager module not needed).
 
+## Phase 5a — Playback resolution/fps caps (max_playback_height / max_playback_fps) ✅ DONE & VERIFIED
+
+Adds global-per-file `max_playback_height` (default 480) and `max_playback_fps`
+(default 30) caps: high-res/60fps clips like the 720p@60fps elephant webm are
+now downscaled (keeping aspect) BEFORE chroma-key/copy/paint, and videos above
+the fps cap are frame-sampled (every Nth source frame presented; audio and
+duration untouched). Goals: stable playback on slower machines and much
+smaller precache masks (elephant: 96 MB → ~24 MB of masks, keying cost 4× less).
+
+Files changed: `dyst/config.py` (defaults+validators), `dyst/media.py` (sidecar
+keys), `dyst/precache.py` (cache_key/cache_ready/ensure take caps; build-time
+resize + frame sampling; meta stores effective fps/step/geometry), `dyst/overlay.py`
+(`load()` caps; GIF height downscale; `_load_video_cv` step+resize; `_paint_frame`
+resize + presented-indexed masks; `_next_frame` step-aware pacing; `_on_qt_frame`
+paint-time height cap), `main.py` (`resolve_playback_caps`, caps threaded through
+`_spawn_overlay`/daemon spawner/precache worker, `--play` merge tuple),
+`config.json` + `config_template.json` (keys added AND file reordered into
+canonical groups: Core loop → Media & playback → Audio → Display & layout →
+Chroma key → System; related keys adjacent), `AGENTS.md` §12.4 now mandates the
+config mirror instead of the woolly-mammoth sidecar. NOT fixed: the chroma-matte
+α-floor (~28/255 on pure-green frames — background never fully removed), which
+remains the elephant's green-screen quality issue.
+
+Verified: config default/fallback/merge; sidecar validation + cap resolution;
+precache rebuild of the elephant at caps (52 masks @ 853×480 @30fps, step 2,
+[downscaled]); offscreen overlay playback of the capped cache (step-2 pacing,
+finishes cleanly); `scripts/test_chroma.py` + `scripts/test_phase0.py` all PASS.
+
+## Phase 5b — `end_on_audio_end` (images disappear when the sidecar audio ends) ✅ DONE & VERIFIED
+
+New global + per-file key `end_on_audio_end` (default false): when true, an
+image/GIF **ignores `image_display_seconds`/`duration` entirely** and stays up
+until its sidecar audio reports EndOfMedia, then fades out and closes —
+`max_duration` still applies and wins over long audio. No sidecar audio = no
+effect (normal display timer). A 5 s watchdog ends the visual if the audio
+player never reaches PlayingState so the overlay can never hang. Videos are
+unaffected (they already end at their media end).
+
+Files changed: `dyst/overlay.py` (display timer skipped when the flag is on,
+watchdog + `_audio_end` hook, teardown), `dyst/config.py` (default + bool
+validator), `dyst/media.py` (sidecar bool key), `main.py` (flag pass-through +
+`--play` merge list), `config.json`/`config_template.json` (inserted next to
+`image_display_seconds`), `AGENTS.md` §8/§9, `README.md`.
+
+Verified offscreen with the real `media/images/woolly-mammoth.png` + `.mp3`
+pair (5 cases): flag ON → display timer not armed, audio EndOfMedia ends the
+visual; flag OFF → timer runs, audio end ignored; flag ON + max_duration →
+hard cap still closes the overlay; never-starting audio → watchdog ends the
+visual (no hang); flag ON + fade_in → still no display timer. `test_phase0.py`
+all PASS.
+
 ## Known limitations
 
 - `main.py --test/--play` are one-shot (play, then exit). Continuous loop is `--daemon`
