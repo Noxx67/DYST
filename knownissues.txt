@@ -4,3 +4,5 @@ the video player is very sluggish when chroma key is added and when the video ha
 some windows pop up with a terminal before. FIXED
 
 green screen isnt that good. FIXED
+
+when scale becomes too big coords for position starting becoming a bit wonky

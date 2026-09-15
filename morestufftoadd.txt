@@ -37,6 +37,6 @@ stuff to add later:
 
     config to play random audiocues along with the image or something
 
-    switch builder to directly use C++ to save space cuz damn what do you mean 200mb for this piece of shit like nuitka
+    switch builder to directly use C++ to save space cuz damn what do you mean 200mb for this piece of shit like nuitka. -UPDATE: nuitka didnt help :sob:
 
     idk what else to add for now. maybe a release build when most of the things work.
