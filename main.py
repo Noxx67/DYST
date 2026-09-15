@@ -221,6 +221,12 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
     per_preset = settings.get("chroma_key") if settings else None
     if per_preset:
         chroma_key_cfg = cfg.chroma_preset_cfg(per_preset, chroma_key_cfg)
+        # Per-file "custom" preset: ranges come from this sidecar
+        # (chroma_hue_range / chroma_saturation_range /
+        # chroma_value_range) — inherited from global otherwise.
+        if str(per_preset).strip().lower() == "custom":
+            chroma_key_cfg = cfg.apply_custom_chroma_ranges(
+                chroma_key_cfg, settings)
     use_chroma = chroma_mod.should_apply(item.path, chroma_key_cfg, settings)
     chroma_params = chroma_key_cfg if use_chroma else None
     # Playback caps (resolution/fps) — per-file sidecar can override the
@@ -575,6 +581,7 @@ def _run_qt(config: dict, args) -> int:
                           "position_x", "position_y", "scale_x", "scale_y", "scale",
                           "flip_h", "flip_v", "rotation", "max_duration",
                           "speed", "pitch", "speed_pitch",
+                          "chroma_hue_range", "chroma_saturation_range", "chroma_value_range",
                           "max_playback_height", "max_playback_fps",
                           "end_on_audio_end"):
                     if k in raw and raw[k] is not None:

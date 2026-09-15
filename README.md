@@ -91,18 +91,15 @@ with a warning, never crash the app.
   "flip_v": false,             // mirror vertically
   "rotation": 0,               // rotation in degrees (around the media's center)
 
-  "volume": 0.8,               // master volume/gain 0.0–5.0 (1.0 = 100%; >1 boosts)
-
-  "download_max_height": 1080,  // max video height (px) for the downloader
-                                // (scripts/download_videos.py reads this;
-                                //  CLI 3rd arg overrides)
-
-  "chroma_key": "green",      // green-screen removal: "off" | "green" | "blue" |
-                                // "weak green" | "strong green" | "weak blue" | "strong blue".
-                                // Expert tuning (ranges/despill/exceptions) still works via the
-                                // old dict form {enabled, preset, hue_range, saturation_range,
-                                // value_range, despill, exceptions}.
-
+  // Green/blue-screen removal. 'custom' takes the hue/sat/val ranges
+  // from the keys below (ignored for any other preset).
+  "chroma_key": "green",      // "off" | "green" (default) | "blue" |
+                                // "weak green" | "strong green" | "weak blue"
+                                // | "strong blue" | "custom"
+  "chroma_hue_range": [35, 85],        // hue 0..179 (green ~60, blue ~120)
+  "chroma_saturation_range": [40, 255], // saturation 0..255
+  "chroma_value_range": [40, 255],      // value 0..255
+  // ^^^^ the three range keys are IGNORED unless chroma_key == "custom"
   "autostart": false,           // start with Windows (Phase 6, coming)
   "kill_hotkey": "ctrl+shift+alt+k",  // global dead man's switch ("" = disabled)
   "kill_notify": true,          // show a Windows notification when the kill switch fires
@@ -173,6 +170,10 @@ volume=0.8
 | `max_playback_fps` | any number >= 0 (fps, default `0` = no cap) | Per-file override of the global `max_playback_fps`: cap the effective playback framerate (videos only — OpenCV/chroma/AV1 paths). Sources above it are frame-sampled (every Nth frame presented); duration and audio are untouched. Changing it rebuilds that file's precache. |
 | `max_duration` | any number >= 0 (seconds, default `0`) | Hard cap for this file. When the timer runs out, the video/image/gif **and** its sidecar audio stop **immediately** and the overlay closes **instantly — no fade-out**. `0` = no cap (play naturally). Setting it smaller than `image_display_seconds` truncates the image display; smaller than a video's length cuts the video off early. Per-file wins over the global `max_duration` — use `0` per-file to disable a global cap for one file. **Use string format for ranges:** `"1.0~5.0"`. |
 | `chroma` | `true` / `false` (default: follow the global `chroma_key`) | Per-file override of the green/blue-screen removal. `false` = **skip keying** even when the global `chroma_key` is on (use it for assets that already have real alpha, or for videos that aren't green-screen at all — they'll also get faster, normal playback). `true` = force keying on this file. |
+| `chroma_key` | PRESET: `"green"` (default) | `"blue"` | `"weak green"` | `"strong green"` | `"weak blue"` | `"strong blue"` | `"custom"` | Per-file chroma-key preset (each file its own key, independent of global). `"custom"` ignores the presets and uses the per-file range keys below instead. Setting a preset turns keying ON for that file; `chroma: false` always wins. |
+| `chroma_hue_range` | `[lo, hi]` (default `[35, 85]`) | | | Hue range 0..179 (OpenCV scale; green ~60, blue ~120). **Only used when `chroma_key` is `"custom"` — ignored for every other preset.** |
+| `chroma_saturation_range` | `[lo, hi]` (default `[40, 255]`) | | | Saturation range 0..255. **Only used when `chroma_key` is `"custom"`.** |
+| `chroma_value_range` | `[lo, hi]` (default `[40, 255]`) | | | Value range 0..255. **Only used when `chroma_key` is `"custom"`.** |
 
 `duration`, `image_display_seconds`, and `fade_out_seconds` are **image-only** —
 when attached to a video they are silently ignored (videos play to end and use
@@ -220,14 +221,17 @@ When an overlay triggers (a roll succeeds, or you use `--test` / `--play`):
    mirror it with `flip_h/flip_v`, and rotate it with `rotation` (degrees
    around its center). The custom values only apply when `mode` is `custom`.
 3. **Images:** shown for `image_display_seconds` (or sidecar `duration`),
-   then fade out over `fade_out_seconds` (the window opacity animates 1→0 while
-   any sidecar audio keeps playing). With `fade_in_seconds` set, the image
-   first fades in from transparent (opacity 0→1) **before** the display clock
-   starts — total lifetime = fade_in + display + fade_out. With `speed` (or
-   `speed_pitch`) set, the display time and both fades scale — divided by
-   speed (2× speed = half the display + fade times).
+   then fade out over `fade_out_seconds` (the overlay opacity animates
+   `opacity`→0 while any sidecar audio keeps playing). With `fade_in_seconds`
+   set, the image first fades in from transparent (opacity 0→`opacity`)
+   **before** the display clock starts — total lifetime = fade_in + display +
+   fade_out. With `speed` (or `speed_pitch`) set, the display time and both
+   fades scale — divided by speed (2× speed = half the display + fade times).
+   Fades always run **from/to your configured `opacity`** and take exactly the
+   configured time to get there (a `0.4` opacity with a 2 s fade-in spends the
+   full 2 s going 0→0.4, never overshooting to 1.0).
 4. **Videos:** played to the end via QtMultimedia (audio + modern codecs),
-   then fade out over `fade_out_seconds` (window opacity 1→0).
+   then fade out over `fade_out_seconds` (opacity `opacity`→0).
 
 **`max_duration`** caps any overlay: once the timer runs out, the visual
 (image/gif/video) **and any audio** (sidecar, extracted, or embedded) stop

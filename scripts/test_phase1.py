@@ -377,14 +377,14 @@ def main() -> int:
     assert w.load(img_item.path, "image", image_seconds=0.2, fade_out_seconds=0.0,
                   fade_in_seconds=0.4)
     w.show()
-    assert w.windowOpacity() == 0.0, "overlay must start fully transparent"
+    assert w.paint_opacity == 0.0, "overlay must start fully transparent"
     w.start()
     t0 = time.time()
     deadline = t0 + 0.15
     while time.time() < deadline:
         app.processEvents()
         time.sleep(0.01)
-    mid = w.windowOpacity()
+    mid = w.paint_opacity
     assert 0.0 < mid < 0.9, f"fade-in should be mid-animation, opacity={mid}"
     t_end = time.time()
     assert wait_finished(w, timeout=5.0), "fade-in image never finished"
@@ -411,7 +411,7 @@ def main() -> int:
     assert w._opacity == 0.5
     w.show(); w.start()
     app.processEvents()
-    assert abs(w.windowOpacity() - 0.5) < 0.01, w.windowOpacity()
+    assert abs(w.paint_opacity - 0.5) < 0.01, w.paint_opacity
     w._finish_close()
     print("PASS opacity: image window sits at 0.5 with no fades")
     # Videos get it too (set synchronously in start()).
@@ -419,7 +419,7 @@ def main() -> int:
     assert w.load(vid_item.path, "video-qt", fade_out_seconds=0.0, opacity=0.4)
     w.show(); w.start()
     app.processEvents()
-    assert abs(w.windowOpacity() - 0.4) < 0.01, w.windowOpacity()
+    assert abs(w.paint_opacity - 0.4) < 0.01, w.paint_opacity
     w._finish_close()
     print("PASS opacity: video window at 0.4")
     # Fade-in composes: ends AT the base opacity, not 1.0.
@@ -430,9 +430,9 @@ def main() -> int:
     assert w._fade_in.endValue() == 0.6, w._fade_in.endValue()
     # let the fade-in finish, then check the fade-out starts from 0.6
     t0 = time.time()
-    while time.time() - t0 < 1.0 and w.windowOpacity() < 0.59:
+    while time.time() - t0 < 1.0 and w.paint_opacity < 0.59:
         app.processEvents(); time.sleep(0.01)
-    assert abs(w.windowOpacity() - 0.6) < 0.05, w.windowOpacity()
+    assert abs(w.paint_opacity - 0.6) < 0.05, w.paint_opacity
     w._start_fade()
     assert w._fade.startValue() == 0.6, w._fade.startValue()
     w._finish_close()

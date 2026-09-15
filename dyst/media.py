@@ -13,7 +13,7 @@ import os
 import random
 from dataclasses import dataclass, field
 
-from dyst.config import _CHROMA_PRESETS
+from dyst.config import _CHROMA_PRESETS, apply_custom_chroma_ranges, _CHROMA_CUSTOM_KEYS
 
 log = logging.getLogger("dyst.media")
 
@@ -283,11 +283,30 @@ def _validate_settings(path: str, raw: dict) -> dict:
         # unknown — global preset is used instead. Only takes effect when the
         # per-file "chroma" boolean is true (false wins and disables keying).
         name = str(chroma_key_ovr).strip().lower()
-        if name in _CHROMA_PRESETS:
+        if name in _CHROMA_PRESETS or name == "custom":
             out["chroma_key"] = name
         else:
-            log.warning("media: %s: invalid 'chroma_key' %r (use: green, blue, weak green, strong green, weak blue, strong blue) — ignored",
+            log.warning("media: %s: invalid 'chroma_key' %r (use: green, blue, weak green, strong green, weak blue, strong blue or custom) — ignored",
                         path, chroma_key_ovr)
+    # Custom chroma_key preset: the hue/sat/val ranges come
+    # from the sibling keys (chroma_hue_range etc.) in THIS
+    # sidecar. Stored under chroma_custom_ranges in the settings.
+    custom_ranges = {}
+    for src_key, (dest, lo, hi) in _CHROMA_CUSTOM_KEYS.items():
+        if src_key not in raw:
+            continue
+        val = raw[src_key]
+        if isinstance(val, (list, tuple)) and len(val) == 2 \
+                and isinstance(val[0], (int, float)) \
+                and isinstance(val[1], (int, float)) \
+                and lo <= int(val[0]) <= int(val[1]) <= hi:
+            custom_ranges[dest] = [int(val[0]), int(val[1])]
+            out[src_key] = custom_ranges[dest]
+        else:
+            log.warning("media: %s: invalid %s %r (need [lo, hi], %d..%d) — ignored",
+                        path, src_key, val, lo, hi)
+    out["chroma_custom_ranges"] = custom_ranges
+
     image_display = raw.get("image_display_seconds")
     if image_display is not None:
         try:

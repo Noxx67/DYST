@@ -32,13 +32,16 @@ DONE:
 
     switch builder to directly use C++ to save space cuz damn what do you mean 200mb for this piece of shit like nuitka. -UPDATE: nuitka didnt help :sob:
 
+    notification when the app is closed by the kill switch.
+
+
 stuff to add later:
 
     easier configuration page and maybe a gui instead of the raw config.json 
 
     config to play random audiocues along with the image or something
 
-    notification when the app is closed by the kill switch.
+    categorical randomness for numbers (like either 0.2 or 2 with given weights for each of the categories)
 
     idk what else to add for now. maybe a release build when most of the things work.
 

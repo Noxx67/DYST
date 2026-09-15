@@ -113,11 +113,14 @@ def _hue_distance(hue: np.ndarray, centre: float) -> np.ndarray:
 
 
 def _screen_mask(bgr: np.ndarray, params: dict) -> np.ndarray:
-    """Feathered keep-mask (0..255): 255 = subject, 0 = screen."""
     if cv2 is None:
         raise RuntimeError("OpenCV not available")
 
     h, w = bgr.shape[:2]
+
+    # Convert to float32 for precise color operations
+    bgr_f = bgr.astype(np.float32)
+    b, g, r = bgr_f[:, :, 0], bgr_f[:, :, 1], bgr_f[:, :, 2]
 
     # HSV conversion
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -125,44 +128,48 @@ def _screen_mask(bgr: np.ndarray, params: dict) -> np.ndarray:
     sat = hsv[:, :, 1].astype(np.float32) / 255.0
     val = hsv[:, :, 2].astype(np.float32) / 255.0
 
-    # Screen colour centre (midpoint of hue range)
     hue_lo, hue_hi = params["hue_range"]
     centre = (hue_lo + hue_hi) * 0.5
-    hue_halfwidth = (hue_hi - hue_lo) * 0.5
+    hue_halfwidth = max(1.0, (hue_hi - hue_lo) * 0.5)
 
-    # Circular hue distance from centre
-    dh = _hue_distance(hue, centre) / max(1.0, hue_halfwidth)
+    is_green_key = centre <= 90
 
+    # 1. Standard HSV-based screen probability
+    dh = _hue_distance(hue, centre) / hue_halfwidth
     sat_floor = params["saturation_range"][0] / 255.0
     val_floor = params["value_range"][0] / 255.0
 
-    # Soft sat/val gating: smoothstep from floor to 1.0
     sat_gate = np.clip((sat - sat_floor) / (1.0 - sat_floor + 1e-6), 0.0, 1.0)
     val_gate = np.clip((val - val_floor) / (1.0 - val_floor + 1e-6), 0.0, 1.0)
-    sv_gate = sat_gate * val_gate
+    
+    screen_prob_hsv = np.clip((0.8 - dh) / 0.5, 0.0, 1.0) * sat_gate * val_gate
 
-    inner = 0.3
-    outer = 0.7
+    # 2. Color Dominance Keying (Catches compression artifacts, yellow/teal edge tint)
+    if is_green_key:
+        # Green excess over red and blue
+        max_rb = np.maximum(r, b)
+        green_excess = np.clip((g - max_rb) / (g + max_rb + 1e-7), 0.0, 1.0)
+        screen_prob_dom = green_excess * sat_gate
+    else:
+        # Blue excess over red and green
+        max_rg = np.maximum(r, g)
+        blue_excess = np.clip((b - max_rg) / (b + max_rg + 1e-7), 0.0, 1.0)
+        screen_prob_dom = blue_excess * sat_gate
 
-    # Screen probability from hue distance (1 = likely screen, 0 = likely subject)
-    screen_prob = np.clip((outer - dh) / (outer - inner + 1e-6), 0.0, 1.0)
+    # Combine both methods (take maximum screen probability)
+    screen_prob = np.maximum(screen_prob_hsv, screen_prob_dom)
 
-    # Combine with S/V gates
-    screen_mask = screen_prob * sv_gate
+    # Invert to generate Keep-Alpha mask
+    alpha = 1.0 - screen_prob
 
-    # Invert to get keep-mask (subject = 1, screen = 0)
-    alpha = 1.0 - screen_mask
-    alpha = np.clip(alpha, 0.0, 1.0)
+    # Boost alpha contrast: sharpens edge removal and guarantees solid subject interiors
+    alpha = np.clip((alpha - 0.15) / 0.70, 0.0, 1.0)
 
-    # # In _screen_mask: ensure high alpha values reach full opacity (255)
-    # alpha = 1.0 - screen_mask
-
-    # # Remap alpha to ensure solid subject coverage
-    # alpha = np.clip((alpha - 0.1) / 0.8, 0.0, 1.0)
-
-    # Resolution-adaptive morphological cleanup
+    # Morphological cleaning & resolution-adaptive softening
     alpha_u8 = (alpha * 255).astype(np.uint8)
     erode_kernel, close_kernel, k_blur = _get_kernels(h, w)
+    
+    # Slight erode eliminates residual pale borders around subject
     alpha_u8 = cv2.erode(alpha_u8, erode_kernel, iterations=1)
     alpha_u8 = cv2.morphologyEx(alpha_u8, cv2.MORPH_CLOSE, close_kernel, iterations=1)
     alpha_u8 = cv2.GaussianBlur(alpha_u8, (k_blur, k_blur), 0)

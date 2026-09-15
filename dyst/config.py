@@ -81,6 +81,12 @@ DEFAULTS: Dict[str, Any] = {
         # was the #1 "masked wrong" look. Edge-only pixel work, cheap.
         "despill": True,
     },
+    # Custom chroma key: ONLY used when `chroma_key` is set to "custom"
+    # (or the dict form uses preset "custom"). Ignored otherwise.
+    # Hue is OpenCV's 0..179 scale (green ~60, blue ~120), sat/val 0..255.
+    "chroma_hue_range": [35, 85],
+    "chroma_saturation_range": [40, 255],
+    "chroma_value_range": [40, 255],
     # Misc
     "download_max_height": 1080,  # max video height (px) for the downloader
     "rescan_seconds": 0,          # daemon: re-scan media folder every N secs (0=off)
@@ -145,6 +151,11 @@ def chroma_preset_cfg(preset_name: str, base_cfg: dict) -> dict:
     preset means filter this file).
     """
     name = str(preset_name).strip().lower()
+    if name == "custom":
+        out = dict(base_cfg)
+        out["preset"] = "custom"
+        out["enabled"] = True
+        return out
     preset = _CHROMA_PRESETS.get(name)
     if preset is None:
         log.warning("chroma_preset_cfg: unknown preset %r — using base config as-is",
@@ -155,6 +166,41 @@ def chroma_preset_cfg(preset_name: str, base_cfg: dict) -> dict:
     out["enabled"] = True
     for k in ("hue_range", "saturation_range", "value_range"):
         out[k] = list(preset[k])
+    return out
+
+
+# Per-file sibling keys for the "custom" chroma_key preset.
+# Ignored unless preset == "custom" (checked by the callers).
+_CHROMA_CUSTOM_KEYS = {
+    "chroma_hue_range": ("hue_range", 0, 179),
+    "chroma_saturation_range": ("saturation_range", 0, 255),
+    "chroma_value_range": ("value_range", 0, 255),
+}
+
+
+def apply_custom_chroma_ranges(out: dict, source: dict) -> dict:
+    """Fill a chroma config's ranges from sibling keys.
+
+    Only acts when `out["preset"] == "custom"` — otherwise returns
+    `out` unchanged so the keys are ignored for every other preset.
+    `source` is the dict the keys were read from (config.json or a
+    per-file sidecar).
+
+    Hue is OpenCV's 0..179 scale; saturation/value are 0..255.
+    """
+    if str(out.get("preset", "")).strip().lower() != "custom":
+        return out
+    for src_key, (dest, lo, hi) in _CHROMA_CUSTOM_KEYS.items():
+        if src_key not in source:
+            continue
+        val = source[src_key]
+        if isinstance(val, (list, tuple)) and len(val) == 2 \
+                and _is_num(val[0]) and _is_num(val[1]) \
+                and lo <= int(val[0]) <= int(val[1]) <= hi:
+            out[dest] = [int(val[0]), int(val[1])]
+        else:
+            log.warning("config: invalid %s %r (need [lo, hi], %d..%d) — ignoring",
+                        src_key, val, lo, hi)
     return out
 
 
@@ -235,6 +281,9 @@ _TOP_LEVEL_RULES = {
     "debug": (_is_bool, DEFAULTS["debug"]),
     "kill_hotkey": (lambda v: isinstance(v, str), DEFAULTS["kill_hotkey"]),
     "kill_notify": (_is_bool, DEFAULTS["kill_notify"]),
+    "chroma_hue_range": (lambda v: _is_range(v, 0, 179), DEFAULTS["chroma_hue_range"]),
+    "chroma_saturation_range": (lambda v: _is_range(v, 0, 255), DEFAULTS["chroma_saturation_range"]),
+    "chroma_value_range": (lambda v: _is_range(v, 0, 255), DEFAULTS["chroma_value_range"]),
 }
 
 
@@ -252,6 +301,14 @@ def _validate_chroma_key(value: Any) -> Dict[str, Any]:
         if name in ("off", "false", "no", "none", "disabled"):
             out = copy.deepcopy(_CHROMA_KEY_DEFAULTS)
             out["enabled"] = False
+            return out
+        if name == "custom":
+            # Ranges come from the sibling keys (chroma_hue_range /
+            # chroma_saturation_range / chroma_value_range) — see
+            # apply_custom_chroma_ranges(). Default ranges kept so
+            # out is always a complete chroma dict.
+            out = copy.deepcopy(_CHROMA_KEY_DEFAULTS)
+            out["preset"] = "custom"
             return out
         if not name:
             return copy.deepcopy(_CHROMA_KEY_DEFAULTS)
@@ -289,6 +346,9 @@ def _validate_chroma_key(value: Any) -> Dict[str, Any]:
             name = preset.strip().lower()
             if not name:
                 pass  # "" = manual ranges; nothing to apply
+            elif name == "custom":
+                out["preset"] = "custom"
+                out = apply_custom_chroma_ranges(out, value)
             elif name in _CHROMA_PRESETS:
                 out["preset"] = name
                 p = _CHROMA_PRESETS[name]
@@ -296,7 +356,7 @@ def _validate_chroma_key(value: Any) -> Dict[str, Any]:
                 out["saturation_range"] = list(p["saturation_range"])
                 out["value_range"] = list(p["value_range"])
             else:
-                log.warning("config: unknown chroma_key preset %r (use: green, weak green, strong green, blue, weak blue, strong blue) — ignoring", preset)
+                log.warning("config: unknown chroma_key preset %r (use: green, blue, weak green, strong green, weak blue, strong blue or custom) — ignoring", preset)
         else:
             log.warning("config: chroma_key 'preset' must be a string — ignoring")
     except KeyError:
@@ -345,6 +405,11 @@ def load_config(path: str) -> Dict[str, Any]:
 
                 if "chroma_key" in user:
                     cfg["chroma_key"] = _validate_chroma_key(user["chroma_key"])
+                    # "custom" preset: take ranges from the sibling
+                    # keys chroma_hue_range / chroma_saturation_range /
+                    # chroma_value_range (ignored for other presets).
+                    cfg["chroma_key"] = apply_custom_chroma_ranges(
+                        cfg["chroma_key"], user)
 
                 # Deprecated alias: "fade_seconds" -> "fade_out_seconds".
                 # The new key wins when both are present.

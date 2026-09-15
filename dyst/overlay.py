@@ -26,7 +26,7 @@ import random
 import cv2
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import Property, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtWidgets import QApplication, QWidget
@@ -48,7 +48,17 @@ class OverlayWindow(QWidget):
     and modern codecs (AV1) work via system codecs; AV1 additionally uses the
     OpenCV software path with the extracted audio as the sync clock.
 
-    Fades windowOpacity 1→0 over fade_out_seconds, then emits `finished`.
+    Opacity (base `opacity` + fade-in/out) is applied by the PAINTER, not by
+    QWidget.windowOpacity: the overlay is a per-pixel-alpha layered window
+    (WA_TranslucentBackground -> UpdateLayeredWindow on Windows), and
+    windowOpacity is applied through SetLayeredWindowAttributes, which
+    UpdateLayeredWindow overrides on every repaint — so it silently does
+    nothing on Windows (the fade would show the raw media, never reaching the
+    configured opacity). Animating `paint_opacity` and calling
+    QPainter.setOpacity() in paintEvent multiplies the media's own alpha and
+    works everywhere.
+
+    Animates `paint_opacity` to 0 over fade_out_seconds, then emits `finished`.
     """
 
     finished = Signal()
@@ -107,10 +117,14 @@ class OverlayWindow(QWidget):
         self._video_timer.setInterval(self.FRAME_MS)
         self._video_timer.timeout.connect(self._next_frame)
 
-        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        # Paint opacity (0..1): the ACTUAL rendering opacity. Animated by the
+        # fade animations instead of windowOpacity (see the class docstring).
+        self._paint_opacity_value = 1.0
+
+        self._fade = QPropertyAnimation(self, b"paint_opacity", self)
         self._fade.finished.connect(self._fade_finished)
 
-        self._fade_in = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_in = QPropertyAnimation(self, b"paint_opacity", self)
         self._fade_in.finished.connect(self._on_fade_in_finished)
 
         self.setWindowFlags(
@@ -129,6 +143,26 @@ class OverlayWindow(QWidget):
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.raise_()
         self.setCursor(Qt.BlankCursor)
+
+    # -- paint opacity ----------------------------------------------------
+
+    def _get_paint_opacity(self) -> float:
+        return self._paint_opacity_value
+
+    def _set_paint_opacity(self, value: float) -> None:
+        """Animated property: alpha multiplier used by paintEvent.
+
+        Clamped to 0..1 (setWindowOpacity did the same). Repaints on every
+        change so the fades are visible for stills/GIFs as well as videos.
+        """
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 1.0
+        self._paint_opacity_value = max(0.0, min(1.0, value))
+        self.update()
+
+    paint_opacity = Property(float, _get_paint_opacity, _set_paint_opacity)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -229,7 +263,10 @@ class OverlayWindow(QWidget):
         if self._fade_in_seconds > 0:
             # Be invisible from the moment the window is shown (start() then
             # animates opacity 0->base opacity).
-            self.setWindowOpacity(0.0)
+            self.paint_opacity = 0.0
+        else:
+            # Apply the base opacity immediately (no full-opacity first frame).
+            self.paint_opacity = self._opacity
         # Sidecar audio: explicit argument wins; else auto-detect by basename
         if sidecar_audio and os.path.isfile(sidecar_audio):
             self._sidecar = sidecar_audio
@@ -368,7 +405,7 @@ class OverlayWindow(QWidget):
     def start(self) -> None:
         """Begin playback: image timer, Qt video, or OpenCV frame loop."""
         # Base opacity for the whole overlay (fades compose on top of it).
-        self.setWindowOpacity(self._opacity)
+        self.paint_opacity = self._opacity
         self._start_max_timer()
         if self._kind == "image":
             if self._audio_player is not None:
@@ -400,7 +437,7 @@ class OverlayWindow(QWidget):
                 # Fade in FIRST (opacity 0 -> base opacity); the display clock
                 # starts when it completes, so lifetime = fade_in + display +
                 # fade_out.
-                self.setWindowOpacity(0.0)
+                self.paint_opacity = 0.0
                 self._fade_in.setDuration(int(self._fade_in_seconds * 1000 / self._speed))
                 self._fade_in.setStartValue(0.0)
                 self._fade_in.setEndValue(self._opacity)
@@ -768,7 +805,7 @@ class OverlayWindow(QWidget):
         self._on_visual_finished()
 
     def _fade_finished(self) -> None:
-        """Fade-out animation (windowOpacity 1->0) has completed."""
+        """Fade-out animation has completed (paint_opacity reached 0)."""
         self._fade_done = True
         self._close_if_ready()
 
@@ -1015,6 +1052,9 @@ class OverlayWindow(QWidget):
         if self._current is None or self._current.isNull():
             return
         painter = QPainter(self)
+        # Base opacity + fades: per-pixel alpha (windowOpacity is a no-op on
+        # Windows layered/translucent windows - see the class docstring).
+        painter.setOpacity(self._paint_opacity_value)
         img = self._current
         if self._mode == "custom":
             # Custom layout: position/scale/flip/rotate. Scale is relative to
