@@ -20,6 +20,7 @@ import sys
 
 from dyst import __version__, chroma as chroma_mod, config as cfg, media, precache as precache_mod
 from dyst.hotkey import register_hotkey, unregister_hotkey, HotkeyFilter
+from dyst import notify
 from dyst.media import _parse_txt_settings, _validate_settings
 
 log = logging.getLogger("dyst.main")
@@ -507,6 +508,21 @@ def _run_daemon(app, config: dict) -> None:
                     "(run scripts/make_test_asset.py or drop files in media/)")
 
 
+def _kill_switch(app, config: dict) -> None:
+    """Dead man's switch fired: notify the user, then quit the app.
+
+    The notification is rendered by a detached helper process (see
+    dyst/notify.py) so it stays visible after the app exits. Silenced by
+    config `kill_notify: false`.
+    """
+    hotkey = config.get("kill_hotkey", "") or "hotkey"
+    log.warning("main: kill switch pressed (%s) — terminating", hotkey)
+    if config.get("kill_notify", True):
+        notify.show("DYST — kill switch",
+                    f"Kill switch pressed ({hotkey}). Overlays stopped, app closed.")
+    app.quit()
+
+
 def _run_qt(config: dict, args) -> int:
     from PySide6.QtWidgets import QApplication
 
@@ -520,7 +536,7 @@ def _run_qt(config: dict, args) -> int:
     # the hotkey is polled via QTimer instead).
     if sys.platform != "win32":
         app.installNativeEventFilter(hotkey_filter)
-    _hotkey_registered = register_hotkey(kill_hotkey, app.quit)
+    _hotkey_registered = register_hotkey(kill_hotkey, lambda: _kill_switch(app, config))
     if _hotkey_registered:
         log.info("main: kill hotkey active (%s)", kill_hotkey)
 
@@ -605,12 +621,23 @@ def main(argv=None) -> int:
                         help="run the chance loop (ticker) without a tray icon")
     parser.add_argument("--roll", action="store_true",
                         help="simulate one roll and print the result")
+    # Internal: detached notification helper (see dyst/notify.py), used so a
+    # notification can outlive the app (kill switch). Not for human use.
+    parser.add_argument("--notify", nargs=3, metavar=("TITLE", "MESSAGE", "TIMEOUT_MS"),
+                        help=argparse.SUPPRESS)
     parser.add_argument("--autostart", action="store_true",
                         help="(written by the app itself into the Windows Run key) "
                              "marks a boot-launch so the app can self-remove when config says off")
     default_config_path = os.path.join(get_base_dir(), "config.json")
     parser.add_argument("--config", default=default_config_path, help="path to config file")
     args = parser.parse_args(argv)
+
+    if args.notify:
+        try:
+            timeout_ms = int(args.notify[2])
+        except ValueError:
+            timeout_ms = notify.DEFAULT_TIMEOUT_MS
+        return 0 if notify.show_blocking(args.notify[0], args.notify[1], timeout_ms) else 1
 
     config = cfg.load_config(args.config)
     _apply_console_mode(config)

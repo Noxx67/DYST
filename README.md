@@ -51,7 +51,10 @@ There are **3 layers** of configuration, applied in order (later wins):
 
 ### 1. `config.json` (global)
 
-Full key reference with hints: see `config_template.json` (in this folder and in the build output).
+Full key reference with hints: `config.json` itself carries a `_hints` block
+documenting every global key (and how it interacts with the per-file keys).
+The **per-file** sidecar reference/template is `config_template.json` (copy it
+next to a media file and rename it to match).
 
 Edit this file by hand (a settings window may come later). All keys are
 optional — anything missing falls back to the default. Bad values are ignored
@@ -101,6 +104,8 @@ with a warning, never crash the app.
                                 // value_range, despill, exceptions}.
 
   "autostart": false,           // start with Windows (Phase 6, coming)
+  "kill_hotkey": "ctrl+shift+alt+k",  // global dead man's switch ("" = disabled)
+  "kill_notify": true,          // show a Windows notification when the kill switch fires
   "debug": false                // verbose logging to app.log
 }
 ```
@@ -257,6 +262,19 @@ So best-quality AV1 downloads now play with **both picture AND sound** and
 without console error spam. This needs `ffmpeg` on the machine (which the
 downloader requires anyway). Temporary audio files are cleaned up after
 playback.
+
+### Kill switch (dead man's switch)
+
+Press `kill_hotkey` (default **`ctrl+shift+alt+k`**) at any time and DYST
+**terminates immediately** — the safety net for when overlays go haywire and
+the tray is unreachable. Set `kill_hotkey` to `""` to disable it.
+
+When `kill_notify` is `true` (default), a **Windows notification** pops up
+right after the hotkey fires — *"Kill switch pressed (ctrl+shift+alt+k).
+Overlays stopped, app closed."* — so it's clear the app vanished on purpose
+and how to get it back. The balloon is drawn by a tiny detached helper
+process (`dyst/notify.py`), so it stays on screen even though DYST has
+already exited. Set `kill_notify` to `false` to quit silently.
 
 ---
 

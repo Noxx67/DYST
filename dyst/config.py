@@ -33,8 +33,6 @@ DEFAULTS: Dict[str, Any] = {
     "tick_seconds": 1.0,
     "odds": 1000,
     "max_concurrent": 3,
-    "max_on_screen": 0,          # maximum number of video overlays shown at once; 0 = unlimited
-
     "reroll_in_same_tick": True,
     # Media
     "media_folder": "media",
@@ -90,6 +88,7 @@ DEFAULTS: Dict[str, Any] = {
     "show_console": False,        # true = visible log terminal; false = hidden background
     "debug": False,
     "kill_hotkey": "ctrl+shift+alt+k",  # global hotkey to terminate the app (Windows only; empty = disabled)
+    "kill_notify": True,           # show a Windows notification when the kill switch fires
 }
 
 # Per-key validators. Each returns True if the value is acceptable.
@@ -206,8 +205,6 @@ _TOP_LEVEL_RULES = {
     "tick_seconds": (_is_positive, DEFAULTS["tick_seconds"]),
     "odds": (_is_positive, DEFAULTS["odds"]),
     "max_concurrent": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["max_concurrent"]),
-    "max_on_screen": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["max_on_screen"]),
-
     "reroll_in_same_tick": (_is_bool, DEFAULTS["reroll_in_same_tick"]),
     "media_folder": (lambda v: isinstance(v, str) and v != "", DEFAULTS["media_folder"]),
     "image_display_seconds": (_is_positive, DEFAULTS["image_display_seconds"]),
@@ -237,6 +234,7 @@ _TOP_LEVEL_RULES = {
     "show_console": (_is_bool, DEFAULTS["show_console"]),
     "debug": (_is_bool, DEFAULTS["debug"]),
     "kill_hotkey": (lambda v: isinstance(v, str), DEFAULTS["kill_hotkey"]),
+    "kill_notify": (_is_bool, DEFAULTS["kill_notify"]),
 }
 
 

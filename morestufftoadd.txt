@@ -30,6 +30,7 @@ DONE:
 
     kill button or something when the thing just wont stop - id say this takes top priority the rest is an addition - Done
 
+    switch builder to directly use C++ to save space cuz damn what do you mean 200mb for this piece of shit like nuitka. -UPDATE: nuitka didnt help :sob:
 
 stuff to add later:
 
@@ -37,6 +38,8 @@ stuff to add later:
 
     config to play random audiocues along with the image or something
 
-    switch builder to directly use C++ to save space cuz damn what do you mean 200mb for this piece of shit like nuitka. -UPDATE: nuitka didnt help :sob:
+    notification when the app is closed by the kill switch.
 
     idk what else to add for now. maybe a release build when most of the things work.
+
+    way to test play the media for the .exe executor
