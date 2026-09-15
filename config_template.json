@@ -32,6 +32,7 @@
   "flip_v": false,
   "rotation": 0,
   "weight": 1,
+  "play_once": false,
   "chroma_hue_range": [35, 85],
   "chroma_saturation_range": [40, 255],
   "chroma_value_range": [40, 255],
@@ -59,11 +60,12 @@
     "flip_v": "Custom mode only: mirror THIS media vertically (true/false; \"random\" picks a random bool each trigger). Overrides the global `flip_v`. Ignored unless `mode` is custom.",
     "rotation": "Custom mode only: rotation in degrees for THIS media, around its own center (any number). Overrides the global `rotation`. Ignored unless `mode` is custom. Supports ranges: \"0~360\".",
     "weight": "Pick likelihood relative to all other media (>= 0, floats allowed; default 1): chance = weight / total_weight. 2 = twice as likely as a weight-1 file, 0.5 = half, 0 = NEVER picked (a warning is logged at scan). Works in ANY mode. Not shown in the top-level keys above only because it defaults to 1; add it to a sidecar to change it.",
+    "play_once": "true = THIS media cannot be selected again while any copy of it is already playing. false = repeats are allowed. Overrides the global `play_once`. Default false.",
     "chroma": "Per-file ON/OFF gate for chroma-key removal: true = filter THIS file using the global (or per-file) preset, false = SKIP filtering even when the global `chroma_key` is on (use it for assets that already have real alpha, or normal videos). `false` ALWAYS wins over a preset. Works in ANY mode. Omitted from the top-level keys above so copying this template does not force keying on; add it to a sidecar when needed.",
-    "chroma_key": "Per-file chroma PRESET for THIS file: 'green' | 'blue' | 'weak green' | 'strong green' | 'weak blue' | 'strong blue' | 'custom'. Uses its own key independent of the global `chroma_key`. NOTE: setting a per-file preset turns keying ON for that file (it sets enabled = true), so only add it to files that really are shot against that colour screen; a per-file `chroma: false` still wins and skips keying. The precache key includes the preset, so changing it rebuilds the cache. Omitted from the top-level keys above so copying this template does not force keying on; see _example_sidecar. 'custom' ignores the presets: it takes the hue/saturation/value ranges from the per-file `chroma_hue_range` / `chroma_saturation_range` / `chroma_value_range` keys below instead.",
+    "chroma_key": "Per-file chroma PRESET for THIS file: 'green' | 'blue' | 'weak green' | 'strong green' | 'weak blue' | 'strong blue' | 'black' | 'white' | 'custom'. Uses its own key independent of the global `chroma_key`. NOTE: setting a per-file preset turns keying ON for that file (it sets enabled = true), so only add it to files that really are shot against that colour screen; a per-file `chroma: false` still wins and skips keying. The precache key includes the preset, so changing it rebuilds the cache. Omitted from the top-level keys above so copying this template does not force keying on; see _example_sidecar. 'custom' ignores the presets: it takes the hue/saturation/value ranges from the per-file `chroma_hue_range` / `chroma_saturation_range` / `chroma_value_range` keys below instead.",
     "chroma_hue_range": "Per-file custom-chroma range [lo, hi] — OpenCV hue 0..179 (green ~60, blue ~120). Used ONLY when `chroma_key` is 'custom' (or the expert dict form uses preset 'custom'); ignored for every other preset. Default [35, 85].",
     "chroma_saturation_range": "Per-file custom-chroma range [lo, hi], saturation 0..255. Used ONLY when `chroma_key` is 'custom'; ignored otherwise. Default [40, 255].",
-    "chroma_value_range": "Per-file custom-chroma range [lo, hi], value 0..255. Used ONLY when `chroma_key` is 'custom'; ignored otherwise. Default [40, 255].",
+    "chroma_value_range": "Per-file custom-chroma range [lo, hi], value 0..255. Used ONLY when `chroma_key` is 'custom'; ignored otherwise. Default [40, 255]."
   },
   "_hints_deprecated": "OLD/REMOVED keys: 'fade_seconds' renamed to 'fade_out_seconds' (old name still accepted as a deprecated alias); the global 'cover' mode was removed (falls back to 'fit'); per-file 'chroma' is now a true/false ON/OFF gate, while 'chroma_key' is the per-file PRESET string."
 }

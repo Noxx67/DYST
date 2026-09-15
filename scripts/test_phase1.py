@@ -462,6 +462,22 @@ def main() -> int:
     assert len(calls) == 1, f"expected burst to stop after refusal, got {len(calls)}"
     print("PASS ticker: spawn refused -> burst stops")
 
+    # 7. play_once policy
+    a = media.MediaItem("/tmp/A.png", "image")
+    b = media.MediaItem("/tmp/B.png", "image")
+    # default global false -> not play_once
+    assert media.effective_play_once(a.settings, False) is False
+    # global true applies unless per-file false
+    assert media.effective_play_once(a.settings, True) is True
+    assert media.effective_play_once({**a.settings, "play_once": False}, True) is False
+    # path identity is case-insensitive on Windows
+    assert media.path_key("/tmp/A.png") == media.path_key("/TMP/a.png")
+    # pick_from excludes active paths while keeping weights
+    pool = [media.MediaItem("/tmp/A.png", "image", {"weight": 2}), media.MediaItem("/tmp/B.png", "image")]
+    picks = [media.pick_from(pool, excluded_paths={media.path_key("/tmp/A.png")}) for _ in range(20)]
+    assert all(p.path == "/tmp/B.png" for p in picks), [p.path for p in picks]
+    print("PASS play_once: effective override + path identity + picker exclusion")
+
     if failures:
         print(f"\n{len(failures)} FAILURE(S):")
         for f in failures:

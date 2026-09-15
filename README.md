@@ -174,6 +174,7 @@ volume=0.8
 | `chroma_hue_range` | `[lo, hi]` (default `[35, 85]`) | | | Hue range 0..179 (OpenCV scale; green ~60, blue ~120). **Only used when `chroma_key` is `"custom"` — ignored for every other preset.** |
 | `chroma_saturation_range` | `[lo, hi]` (default `[40, 255]`) | | | Saturation range 0..255. **Only used when `chroma_key` is `"custom"`.** |
 | `chroma_value_range` | `[lo, hi]` (default `[40, 255]`) | | | Value range 0..255. **Only used when `chroma_key` is `"custom"`.** |
+| `play_once` | `true` / `false` (default `false`) | | | true = this media won’t be picked again while any copy of it is already playing. false = repeats are allowed. Per-file value overrides the global `play_once`. |
 
 `duration`, `image_display_seconds`, and `fade_out_seconds` are **image-only** —
 when attached to a video they are silently ignored (videos play to end and use

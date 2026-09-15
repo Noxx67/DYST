@@ -72,7 +72,65 @@ _CHROMA_PRESETS: dict[str, dict[str, list[int]]] = {
         "saturation_range": [60, 255],
         "value_range": [50, 255],
     },
+    "black": {
+        "hue_range": [0, 179],
+        "saturation_range": [0, 255],
+        "value_range": [0, 35],
+    },
+    "white": {
+        "hue_range": [0, 179],
+        "saturation_range": [0, 30],
+        "value_range": [220, 255],
+    },
 }
+
+
+# ----------------------------------------------------------------------
+# Parameter extraction / preset resolution
+# ----------------------------------------------------------------------
+def _coerce_range(val, lo: int, hi: int, default):
+    """Coerce *val* to a validated [lo, hi] range."""
+    if isinstance(val, (list, tuple)) and len(val) == 2:
+        try:
+            a, b = int(val[0]), int(val[1])
+            if lo <= a <= b <= hi:
+                return [a, b]
+        except Exception:
+            pass
+    return list(default)
+
+
+def _parse_params(params: dict) -> dict:
+    """Resolve preset/custom chroma parameters and detect luma mode."""
+    preset = str(params.get("preset", "")).strip().lower()
+    if preset == "custom":
+        out = dict(params)
+        hr = params.get("chroma_hue_range", params.get("hue_range"))
+        sr = params.get("chroma_saturation_range", params.get("saturation_range"))
+        vr = params.get("chroma_value_range", params.get("value_range"))
+        out["hue_range"] = _coerce_range(hr, 0, 179, [0, 179])
+        out["saturation_range"] = _coerce_range(sr, 0, 255, [0, 255])
+        out["value_range"] = _coerce_range(vr, 0, 255, [0, 255])
+    elif preset in _CHROMA_PRESETS:
+        p = _CHROMA_PRESETS[preset]
+        out = dict(params)
+        out["hue_range"] = list(p["hue_range"])
+        out["saturation_range"] = list(p["saturation_range"])
+        out["value_range"] = list(p["value_range"])
+    else:
+        out = dict(params)
+        out.setdefault("hue_range", [0, 179])
+        out.setdefault("saturation_range", [0, 255])
+        out.setdefault("value_range", [0, 255])
+
+    sat_hi = out["saturation_range"][1]
+    val_hi = out["value_range"][1]
+    val_lo = out["value_range"][0]
+    if sat_hi <= 30 or val_hi <= 60 or val_lo >= 200:
+        out["mode"] = "luma"
+    else:
+        out["mode"] = "chroma"
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -116,61 +174,91 @@ def _screen_mask(bgr: np.ndarray, params: dict) -> np.ndarray:
     if cv2 is None:
         raise RuntimeError("OpenCV not available")
 
+    p = _parse_params(params)
     h, w = bgr.shape[:2]
 
-    # Convert to float32 for precise color operations
+    # Convert to float32
     bgr_f = bgr.astype(np.float32)
     b, g, r = bgr_f[:, :, 0], bgr_f[:, :, 1], bgr_f[:, :, 2]
 
-    # HSV conversion
+    if p.get("mode") == "luma":
+        # Luma Auto-Detection: calculate alpha based on grayscale luminance
+        # to prevent dark/light subject regions from getting eaten or creating
+        # hue division errors.
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        val_lo = p["value_range"][0] / 255.0
+        val_hi = p["value_range"][1] / 255.0
+        if val_hi <= 60 / 255.0:
+            # Remove dark pixels (e.g., black key)
+            alpha = np.clip((gray - val_lo) / (1.0 - val_lo + 1e-6), 0.0, 1.0)
+        elif val_lo >= 200 / 255.0:
+            # Remove bright pixels (e.g., white key)
+            alpha = np.clip((val_hi - gray) / (val_hi + 1e-6), 0.0, 1.0)
+        else:
+            # Generic luma: remove pixels within the value range
+            alpha = 1.0 - np.clip((gray - val_lo) / (val_hi - val_lo + 1e-6), 0.0, 1.0)
+        alpha = np.clip((alpha - 0.05) / 0.90, 0.0, 1.0)
+        alpha_u8 = (alpha * 255).astype(np.uint8)
+        erode_kernel, close_kernel, k_blur = _get_kernels(h, w)
+        alpha_u8 = cv2.morphologyEx(alpha_u8, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        alpha_u8 = cv2.GaussianBlur(alpha_u8, (k_blur, k_blur), 0)
+        return alpha_u8
+
+    # Chroma mode: radial Hue distance keying across H, S, V channels
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     hue = hsv[:, :, 0].astype(np.float32)
     sat = hsv[:, :, 1].astype(np.float32) / 255.0
     val = hsv[:, :, 2].astype(np.float32) / 255.0
 
-    hue_lo, hue_hi = params["hue_range"]
+    hue_lo, hue_hi = p["hue_range"]
     centre = (hue_lo + hue_hi) * 0.5
     hue_halfwidth = max(1.0, (hue_hi - hue_lo) * 0.5)
 
-    is_green_key = centre <= 90
-
     # 1. Standard HSV-based screen probability
     dh = _hue_distance(hue, centre) / hue_halfwidth
-    sat_floor = params["saturation_range"][0] / 255.0
-    val_floor = params["value_range"][0] / 255.0
+    sat_floor = p["saturation_range"][0] / 255.0
+    val_floor = p["value_range"][0] / 255.0
 
     sat_gate = np.clip((sat - sat_floor) / (1.0 - sat_floor + 1e-6), 0.0, 1.0)
     val_gate = np.clip((val - val_floor) / (1.0 - val_floor + 1e-6), 0.0, 1.0)
-    
+
     screen_prob_hsv = np.clip((0.8 - dh) / 0.5, 0.0, 1.0) * sat_gate * val_gate
 
-    # 2. Color Dominance Keying (Catches compression artifacts, yellow/teal edge tint)
-    if is_green_key:
-        # Green excess over red and blue
+    # 2. Color Dominance Keying with Absolute Threshold (Prevents black/shadow eating)
+    if centre <= 45:
+        # Red dominance
+        max_gb = np.maximum(g, b)
+        red_excess = np.where(r > 15.0, np.clip((r - max_gb) / (r + max_gb + 1e-3), 0.0, 1.0), 0.0)
+        screen_prob_dom = red_excess * sat_gate * val_gate
+    elif centre <= 90:
+        # Green dominance
         max_rb = np.maximum(r, b)
-        green_excess = np.clip((g - max_rb) / (g + max_rb + 1e-7), 0.0, 1.0)
-        screen_prob_dom = green_excess * sat_gate
+        green_excess = np.where(g > 15.0, np.clip((g - max_rb) / (g + max_rb + 1e-3), 0.0, 1.0), 0.0)
+        screen_prob_dom = green_excess * sat_gate * val_gate
     else:
-        # Blue excess over red and green
+        # Blue dominance
         max_rg = np.maximum(r, g)
-        blue_excess = np.clip((b - max_rg) / (b + max_rg + 1e-7), 0.0, 1.0)
-        screen_prob_dom = blue_excess * sat_gate
+        blue_excess = np.where(b > 15.0, np.clip((b - max_rg) / (b + max_rg + 1e-3), 0.0, 1.0), 0.0)
+        screen_prob_dom = blue_excess * sat_gate * val_gate
 
-    # Combine both methods (take maximum screen probability)
+    # Combine probabilities
     screen_prob = np.maximum(screen_prob_hsv, screen_prob_dom)
+
+    # Hard guard: Any pixel darker than the value floor is guaranteed to be SUBJECT
+    dark_mask = val < val_floor
+    screen_prob[dark_mask] = 0.0
 
     # Invert to generate Keep-Alpha mask
     alpha = 1.0 - screen_prob
 
-    # Boost alpha contrast: sharpens edge removal and guarantees solid subject interiors
-    alpha = np.clip((alpha - 0.15) / 0.70, 0.0, 1.0)
+    # Remap alpha gently without destroying dark details
+    alpha = np.clip((alpha - 0.05) / 0.90, 0.0, 1.0)
 
-    # Morphological cleaning & resolution-adaptive softening
+    # Clean up mask without eroding away thin/dark subject parts
     alpha_u8 = (alpha * 255).astype(np.uint8)
     erode_kernel, close_kernel, k_blur = _get_kernels(h, w)
-    
-    # Slight erode eliminates residual pale borders around subject
-    alpha_u8 = cv2.erode(alpha_u8, erode_kernel, iterations=1)
+
+    # MORPH_CLOSE fills internal holes inside dark areas without shrinking outer edges
     alpha_u8 = cv2.morphologyEx(alpha_u8, cv2.MORPH_CLOSE, close_kernel, iterations=1)
     alpha_u8 = cv2.GaussianBlur(alpha_u8, (k_blur, k_blur), 0)
 
@@ -184,25 +272,38 @@ def _despill(bgra: np.ndarray, params: dict) -> None:
     if not params.get("despill"):
         return
 
-    hue_lo, hue_hi = params["hue_range"]
+    p = _parse_params(params)
+    if p.get("mode") == "luma":
+        return
+
+    hue_lo, hue_hi = p["hue_range"]
     diff = (hue_hi - hue_lo) % 180
     centre = (hue_lo + diff * 0.5) % 180
-    is_green = centre <= 90
 
     alpha = bgra[:, :, 3].astype(np.float32) / 255.0
-    visible = alpha > 0.05
-
+    visible = (alpha > 0.02) & (alpha < 0.98)
     if not np.any(visible):
         return
 
-    if is_green:
-        r = bgra[visible, 2].astype(np.float32)
-        g = bgra[visible, 1].astype(np.float32)
-        b = bgra[visible, 0].astype(np.float32)
-        
+    b = bgra[visible, 0].astype(np.float32)
+    g = bgra[visible, 1].astype(np.float32)
+    r = bgra[visible, 2].astype(np.float32)
+
+    if 100 <= centre <= 130:
+        # Blue spill
+        max_rg = np.maximum(r, g)
+        spill = np.maximum(0.0, b - max_rg)
+        bgra[visible, 0] = np.clip(b - spill, 0, 255).astype(np.uint8)
+    elif 35 <= centre <= 85:
+        # Green spill
         max_rb = np.maximum(r, b)
         spill = np.maximum(0.0, g - max_rb)
         bgra[visible, 1] = np.clip(g - spill, 0, 255).astype(np.uint8)
+    elif centre <= 15 or centre >= 160:
+        # Red spill
+        max_gb = np.maximum(g, b)
+        spill = np.maximum(0.0, r - max_gb)
+        bgra[visible, 2] = np.clip(r - spill, 0, 255).astype(np.uint8)
 
 
 # ----------------------------------------------------------------------
@@ -212,10 +313,13 @@ def calibrate(cap, params: dict) -> dict:
     """Re-centre the hue window on the video's actual screen colour."""
     if cv2 is None:
         return params
+    p = _parse_params(params)
+    if p.get("mode") == "luma":
+        return params
 
-    hue_lo, hue_hi = params["hue_range"]
-    sat_floor = params["saturation_range"][0]
-    val_floor = params["value_range"][0]
+    hue_lo, hue_hi = p["hue_range"]
+    sat_floor = p["saturation_range"][0]
+    val_floor = p["value_range"][0]
     half = (hue_hi - hue_lo) * 0.5
 
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) or 1

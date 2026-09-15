@@ -139,14 +139,32 @@ def scan(root: str) -> list[MediaItem]:
     return items
 
 
-def pick_from(pool: list[MediaItem]) -> MediaItem | None:
-    """Random pick from an already-scanned pool, weighted by each item's
-    per-file `weight` setting (default 1.0 = normal chance; 2 = twice as
-    likely as a weight-1 item; floats allowed, e.g. 0.5 = half; 0 = never
-    picked). Chance = weight / total_weight across the pool.
-    Falls back to a uniform pick when nothing sets a weight; returns None
-    (with a warning) when every weight is 0 so nothing is picked.
+def path_key(path: str) -> str:
+    """Stable path identity for active-media tracking (case-insensitive on Windows)."""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def effective_play_once(settings: dict | None, global_play_once: bool = False) -> bool:
+    """Resolve per-file `play_once`, falling back to the global value.
+
+    Per-file values override the global default in both directions: a file
+    can opt out of a global restriction with `false`, or opt in when the
+    global default is `false`.
     """
+    return bool((settings or {}).get("play_once", bool(global_play_once)))
+
+
+def pick_from(pool: list[MediaItem], excluded_paths: set[str] | None = None) -> MediaItem | None:
+    """Random pick from an already-scanned pool, optionally excluding paths.
+
+    `excluded_paths` contains normalized path identities (see `path_key`).
+    This is used for global/per-file `play_once`: an active copy of a file is
+    removed from the candidate pool while it is playing, so the same media
+    cannot be selected again until its overlay emits `finished`.
+    """
+    if excluded_paths:
+        excluded = {path_key(p) for p in excluded_paths}
+        pool = [item for item in pool if path_key(item.path) not in excluded]
     if not pool:
         return None
     weights = []
@@ -265,6 +283,13 @@ def _validate_settings(path: str, raw: dict) -> dict:
                     log.warning("media: %s: weight is 0 — this media will NOT show (never picked)", path)
         except (TypeError, ValueError):
             log.warning("media: %s: invalid weight %r", path, weight)
+    play_once = raw.get("play_once")
+    if play_once is not None:
+        b = _parse_bool(play_once)
+        if isinstance(b, bool):
+            out["play_once"] = b
+        else:
+            log.warning("media: %s: invalid 'play_once' %r (use true/false) — ignored", path, play_once)
     chroma_ovr = raw.get("chroma")
     if chroma_ovr is not None:
         # Per-file override of the global chroma-key enabled flag: true =
@@ -286,7 +311,7 @@ def _validate_settings(path: str, raw: dict) -> dict:
         if name in _CHROMA_PRESETS or name == "custom":
             out["chroma_key"] = name
         else:
-            log.warning("media: %s: invalid 'chroma_key' %r (use: green, blue, weak green, strong green, weak blue, strong blue or custom) — ignored",
+            log.warning("media: %s: invalid 'chroma_key' %r (use: green, blue, weak green, strong green, weak blue, strong blue, black, white or custom) — ignored",
                         path, chroma_key_ovr)
     # Custom chroma_key preset: the hue/sat/val ranges come
     # from the sibling keys (chroma_hue_range etc.) in THIS

@@ -392,7 +392,55 @@ def _run_daemon(app, config: dict) -> None:
     class _PreCacheDone(QObject):
         done = Signal()
 
-    def _try_spawn(item: media.MediaItem) -> bool:
+    active_path_counts: dict[str, int] = {}
+    reserved_paths: set[str] = set()
+
+    def _item_play_once(item: media.MediaItem) -> bool:
+        return media.effective_play_once(item.settings, config.get("play_once", False))
+
+    def _play_once_available(item: media.MediaItem, allow_reserved: bool = False) -> bool:
+        if not _item_play_once(item):
+            return True
+        key = media.path_key(item.path)
+        if active_path_counts.get(key, 0) > 0:
+            return False
+        if key in reserved_paths and not allow_reserved:
+            return False
+        return True
+
+    def _claim_play_once(item: media.MediaItem) -> bool:
+        if not _item_play_once(item):
+            return True
+        key = media.path_key(item.path)
+        if active_path_counts.get(key, 0) > 0 or key in reserved_paths:
+            return False
+        reserved_paths.add(key)
+        return True
+
+    def _release_play_once(item: media.MediaItem) -> None:
+        if not _item_play_once(item):
+            return
+        reserved_paths.discard(media.path_key(item.path))
+
+    def _activate_play_once(item: media.MediaItem) -> None:
+        if not _item_play_once(item):
+            return
+        key = media.path_key(item.path)
+        reserved_paths.discard(key)
+        active_path_counts[key] = active_path_counts.get(key, 0) + 1
+
+    def _deactivate_play_once(item: media.MediaItem) -> None:
+        if not _item_play_once(item):
+            return
+        key = media.path_key(item.path)
+        active_path_counts[key] = max(0, active_path_counts.get(key, 0) - 1)
+        if active_path_counts[key] == 0:
+            del active_path_counts[key]
+
+    def _try_spawn(item: media.MediaItem, allow_reserved: bool = False) -> bool:
+        if not _play_once_available(item, allow_reserved=allow_reserved):
+            log.debug("play_once: %s already active/reserved — skipping duplicate", item.path)
+            return False
         # enforce max_concurrent limit (0 = unlimited)
         cap = int(config.get("max_concurrent", 0) or 0)
         if cap > 0 and len(overlays) >= cap:
@@ -400,12 +448,15 @@ def _run_daemon(app, config: dict) -> None:
             return False
         win = _spawn_overlay(config, item)
         if win is None:
+            _release_play_once(item)
             return False
+        _activate_play_once(item)
         overlays.append(win)
 
-        def done(w=win):
+        def done(w=win, item=item):
             if w in overlays:
                 overlays.remove(w)
+            _deactivate_play_once(item)
 
         win.finished.connect(done)
         return True
@@ -423,12 +474,12 @@ def _run_daemon(app, config: dict) -> None:
             # Cache is ready now (or preprocessing failed — _spawn_overlay
             # falls back to live keying); spawn everything that was queued.
             for item in entry["items"]:
-                _try_spawn(item)
+                _try_spawn(item, allow_reserved=True)
 
-    def _precache_worker(item: media.MediaItem, cfg: dict, sig, max_h: int, max_fps: float) -> None:
+    def _precache_worker(item: media.MediaItem, chroma_cfg: dict, sig, max_h: int, max_fps: float) -> None:
         try:
             precache_mod.ensure(
-                item.path, cfg.get("chroma_key", {}),
+                item.path, chroma_cfg,
                 progress=lambda i, n: log.info("precache: keyed %d/%d frames", i, n),
                 max_height=max_h, max_fps=max_fps)
         finally:
@@ -442,6 +493,12 @@ def _run_daemon(app, config: dict) -> None:
             return False
         settings = item.settings or {}
         chroma_key_cfg = config.get("chroma_key", {})
+        per_preset = settings.get("chroma_key")
+        if per_preset:
+            chroma_key_cfg = cfg.chroma_preset_cfg(per_preset, chroma_key_cfg)
+            if str(per_preset).strip().lower() == "custom":
+                chroma_key_cfg = cfg.apply_custom_chroma_ranges(
+                    chroma_key_cfg, settings)
         # Same playback caps the overlay will use — the precache must be
         # built with them so mask geometry matches playback.
         max_pb_h, max_pb_fps = resolve_playback_caps(settings, config)
@@ -455,6 +512,9 @@ def _run_daemon(app, config: dict) -> None:
                                          max_pb_h, max_pb_fps)
             entry = precache_jobs.setdefault(key, {"items": [], "thread": None})
             if entry["thread"] is None:
+                if not _claim_play_once(item):
+                    log.debug("play_once: %s already reserved — skipping precache queue", item.path)
+                    return False
                 if ticker_holder and ticker_holder[0]:
                     ticker_holder[0].stop()  # pause the chance loop
                     log.info("precache: chance loop PAUSED while %s is "
@@ -468,7 +528,7 @@ def _run_daemon(app, config: dict) -> None:
                 entry["sig"] = sig
                 entry["thread"] = threading.Thread(
                     target=_precache_worker,
-                    args=(item, config, sig, max_pb_h, max_pb_fps), daemon=True)
+                    args=(item, chroma_key_cfg, sig, max_pb_h, max_pb_fps), daemon=True)
                 entry["thread"].start()
             if item not in entry["items"]:
                 entry["items"].append(item)
@@ -503,7 +563,15 @@ def _run_daemon(app, config: dict) -> None:
         rt.start()
         log.info("daemon: rescanning media every %ss", rescan_s)
 
-    ticker = Ticker(lambda: media.pick_from(pool), spawner, config, app)
+    def _picker() -> media.MediaItem | None:
+        eligible = [
+            item for item in pool
+            if not (media.effective_play_once(item.settings, config.get("play_once", False))
+                    and active_path_counts.get(media.path_key(item.path), 0) > 0)
+        ]
+        return media.pick_from(eligible)
+
+    ticker = Ticker(_picker, spawner, config, app)
     app._ticker = ticker  # keep alive & parented to app
     ticker_holder.append(ticker)  # spawner can pause/resume for preprocessing
     ticker.start()

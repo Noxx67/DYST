@@ -33,6 +33,7 @@ DEFAULTS: Dict[str, Any] = {
     "tick_seconds": 1.0,
     "odds": 1000,
     "max_concurrent": 3,
+    "play_once": False,          # do not start the same media twice concurrently
     "reroll_in_same_tick": True,
     # Media
     "media_folder": "media",
@@ -136,6 +137,16 @@ _CHROMA_PRESETS: Dict[str, Dict[str, Any]] = {
         "hue_range": [105, 130],
         "saturation_range": [60, 255],
         "value_range": [50, 255],
+    },
+    "black": {
+        "hue_range": [0, 179],
+        "saturation_range": [0, 255],
+        "value_range": [0, 35],
+    },
+    "white": {
+        "hue_range": [0, 179],
+        "saturation_range": [0, 30],
+        "value_range": [220, 255],
     },
 }
 
@@ -251,6 +262,7 @@ _TOP_LEVEL_RULES = {
     "tick_seconds": (_is_positive, DEFAULTS["tick_seconds"]),
     "odds": (_is_positive, DEFAULTS["odds"]),
     "max_concurrent": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["max_concurrent"]),
+    "play_once": (_is_bool, DEFAULTS["play_once"]),
     "reroll_in_same_tick": (_is_bool, DEFAULTS["reroll_in_same_tick"]),
     "media_folder": (lambda v: isinstance(v, str) and v != "", DEFAULTS["media_folder"]),
     "image_display_seconds": (_is_positive, DEFAULTS["image_display_seconds"]),
@@ -320,7 +332,7 @@ def _validate_chroma_key(value: Any) -> Dict[str, Any]:
             out["saturation_range"] = list(p["saturation_range"])
             out["value_range"] = list(p["value_range"])
         else:
-            log.warning("config: unknown chroma_key %r (use: off, green, blue, weak green, strong green, weak blue, strong blue) — using defaults", value)
+            log.warning("config: unknown chroma_key %r (use: off, green, blue, weak green, strong green, weak blue, strong blue, black, white) — using defaults", value)
         return out
     if not isinstance(value, dict):
         log.warning("config: 'chroma_key' must be a string or dict — using defaults")
@@ -356,7 +368,7 @@ def _validate_chroma_key(value: Any) -> Dict[str, Any]:
                 out["saturation_range"] = list(p["saturation_range"])
                 out["value_range"] = list(p["value_range"])
             else:
-                log.warning("config: unknown chroma_key preset %r (use: green, blue, weak green, strong green, weak blue, strong blue or custom) — ignoring", preset)
+                log.warning("config: unknown chroma_key preset %r (use: green, blue, weak green, strong green, weak blue, strong blue, black, white or custom) — ignoring", preset)
         else:
             log.warning("config: chroma_key 'preset' must be a string — ignoring")
     except KeyError:
