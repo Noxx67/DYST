@@ -120,6 +120,11 @@ class OverlayWindow(QWidget):
         # Paint opacity (0..1): the ACTUAL rendering opacity. Animated by the
         # fade animations instead of windowOpacity (see the class docstring).
         self._paint_opacity_value = 1.0
+        self._opacity = 1.0
+        # Pre-rendered frame at the window size (scale/crop/rotate/flip done
+        # ONCE per frame, not on every repaint). paintEvent blits this 1:1.
+        self._render_cache: QImage | None = None
+        self._preparing = False
 
         self._fade = QPropertyAnimation(self, b"paint_opacity", self)
         self._fade.finished.connect(self._fade_finished)
@@ -134,11 +139,13 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
 
+        self._screen_rect = QRect(0, 0, 1920, 1080)
         screen = QApplication.primaryScreen()
         if screen is not None:
-            g = screen.geometry()
-            # Center window on screen
-            self.setGeometry(g.center().x() - g.width() // 2, g.center().y() - g.height() // 2, g.width(), g.height())
+            self._screen_rect = screen.geometry()
+            # Start tiny; _prepare_current() resizes the window to the media's
+            # display rect (keeps the layered/composited surface small).
+            self.setGeometry(self._screen_rect.x(), self._screen_rect.y(), 1, 1)
         # Re-assert topmost after geometry is set (spec: re-assert on show).
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.raise_()
@@ -159,7 +166,13 @@ class OverlayWindow(QWidget):
             value = float(value)
         except (TypeError, ValueError):
             value = 1.0
-        self._paint_opacity_value = max(0.0, min(1.0, value))
+        new = max(0.0, min(1.0, value))
+        old = self._paint_opacity_value
+        if new == old:
+            return
+        self._paint_opacity_value = new
+        # Repaint on every animation step: the frame is pre-scaled into
+        # _render_cache, so each repaint is a cheap 1:1 blit.
         self.update()
 
     paint_opacity = Property(float, _get_paint_opacity, _set_paint_opacity)
@@ -168,6 +181,13 @@ class OverlayWindow(QWidget):
         super().showEvent(event)
         # Ensure mouse transparency is retained after show (some platforms may reset)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Our geometry is authoritative; if it changed, the cached render is
+        # stale — rebuild it (guarded against re-entrancy in _prepare_current).
+        if not self._preparing:
+            self._prepare_current()
 
     # -- public -----------------------------------------------------------
 
@@ -298,7 +318,7 @@ class OverlayWindow(QWidget):
                                     # the mask/work cost scales with the cap.
                                     h2 = self._max_pb_h
                                     w2 = max(1, int(round(frame.width * h2 / frame.height)))
-                                    frame = frame.resize((w2, h2), Image.LANCZOS)
+                                    frame = frame.resize((w2, h2), Image.BILINEAR)
                                 if self._chroma_params is not None:
                                     frame = chroma_mod.chroma_key_image(frame, self._chroma_params)
                                 arr = np.array(frame)
@@ -317,6 +337,7 @@ class OverlayWindow(QWidget):
                             self._gif_frame_index = 0
                             self._current = frames[0] if frames else None
                             self._gif_duration_ms = sum(durations)
+                            self._prepare_current()
 
                             # Initialize single-shot timer
                             self._gif_timer = QTimer(self)
@@ -337,6 +358,7 @@ class OverlayWindow(QWidget):
                 self._current = self._load_image(path)
                 if self._current is None:
                     return False
+                self._prepare_current()
                 if self._sidecar:
                     self._create_audio_player(self._sidecar)
                 return True
@@ -380,27 +402,122 @@ class OverlayWindow(QWidget):
                 return val[0] if val else 0.0
         return val
 
-    def _custom_target(self, img_w: float, img_h: float):
-        """Custom-mode layout for a source of size img_w x img_h.
-
-        Scale is relative to the aspect-preserving "fit" size, so
-        (scale_x, scale_y) == (1, 1) shows the whole media with nothing
-        cropped off screen. Position is normalized edge-pinning:
-        x = (screen_w - disp_w) * position_x -> 0 pins the left edge to the
-        screen's left edge, 1 pins the right edge to the screen's right edge,
-        0.5 centers. Values outside 0..1 are allowed (clamped to -1..2) so
-        media can peek in from the edges or be pushed off-screen and cropped
-        at the screen boundary (Qt clips painting to the widget).
-        Returns (x, y, disp_w, disp_h).
-        """
-        if not img_w or not img_h:
+    def _media_display_rect(self, img_w: float, img_h: float):
+        """On-screen rect (x, y, dw, dh) the media occupies for the current
+        mode, in screen coordinates. Used both to size the overlay window and
+        to build the cached render."""
+        if img_w <= 0 or img_h <= 0:
             return 0.0, 0.0, 0.0, 0.0
-        fit = min(self.width() / img_w, self.height() / img_h)
-        disp_w = img_w * fit * self._scale_x
-        disp_h = img_h * fit * self._scale_y
-        x = (self.width() - disp_w) * self._position_x
-        y = (self.height() - disp_h) * self._position_y
-        return x, y, disp_w, disp_h
+        W = float(self._screen_rect.width())
+        H = float(self._screen_rect.height())
+        mode = self._mode
+        if mode == "stretch":
+            return 0.0, 0.0, W, H
+        if mode == "cover-height":
+            # Fit the screen width; taller media is cropped top/bottom.
+            scale = W / img_w
+            dw = W
+            dh = img_h * scale
+            return 0.0, (H - dh) * 0.5, dw, dh
+        if mode == "cover-width":
+            # Fit the screen height; wider media is cropped left/right.
+            scale = H / img_h
+            dw = img_w * scale
+            dh = H
+            return (W - dw) * 0.5, 0.0, dw, dh
+        if mode == "custom":
+            fit = min(W / img_w, H / img_h)
+            dw = img_w * fit * self._scale_x
+            dh = img_h * fit * self._scale_y
+            return (W - dw) * self._position_x, (H - dh) * self._position_y, dw, dh
+        # fit: whole media visible, centered, aspect kept
+        scale = min(W / img_w, H / img_h)
+        dw = img_w * scale
+        dh = img_h * scale
+        return (W - dw) * 0.5, (H - dh) * 0.5, dw, dh
+
+    def _rotated_bounds(self, dw: float, dh: float) -> tuple[float, float]:
+        """Axis-aligned bounding box of a dw x dh rect rotated by the
+        custom-mode rotation (0 for every other mode)."""
+        if self._mode != "custom" or not self._rotation:
+            return dw, dh
+        import math
+        rad = math.radians(self._rotation)
+        c, s = abs(math.cos(rad)), abs(math.sin(rad))
+        return dw * c + dh * s, dw * s + dh * c
+
+    def _window_rect(self, dx: float, dy: float, dw: float, dh: float):
+        """Window geometry (clamped to the screen) for a display rect — the
+        visible intersection with the screen. Keeps the layered surface as
+        small as possible."""
+        bw, bh = self._rotated_bounds(dw, dh)
+        cx, cy = dx + dw * 0.5, dy + dh * 0.5
+        wx, wy = cx - bw * 0.5, cy - bh * 0.5
+        W = float(self._screen_rect.width())
+        H = float(self._screen_rect.height())
+        x0 = max(0.0, wx)
+        y0 = max(0.0, wy)
+        x1 = min(W, wx + bw)
+        y1 = min(H, wy + bh)
+        if x1 <= x0 or y1 <= y0:
+            return 0, 0, 1, 1  # fully off-screen
+        return (int(round(x0)), int(round(y0)),
+                max(1, int(round(x1 - x0))), max(1, int(round(y1 - y0))))
+
+    def _prepare_current(self) -> None:
+        """Build self._render_cache: the current frame scaled/cropped to the
+        window size, with custom-mode flip/rotation applied. Called only when
+        the frame or geometry changes, so paintEvent can blit it 1:1 (the old
+        code re-scaled the full image on every repaint)."""
+        if self._preparing:
+            return
+        img = self._current
+        if img is None or img.isNull():
+            self._render_cache = None
+            return
+        self._preparing = True
+        try:
+            iw, ih = img.width(), img.height()
+            dx, dy, dw, dh = self._media_display_rect(iw, ih)
+            if dw <= 0 or dh <= 0:
+                self._render_cache = None
+                return
+            wx, wy, ww, wh = self._window_rect(dx, dy, dw, dh)
+            cur = self.geometry()
+            if (cur.x(), cur.y(), cur.width(), cur.height()) != (wx, wy, ww, wh):
+                self.setGeometry(wx, wy, ww, wh)
+
+            if self._mode == "custom" and (self._rotation or self._flip_h or self._flip_v):
+                cache = QImage(ww, wh, QImage.Format_ARGB32_Premultiplied)
+                cache.fill(Qt.transparent)
+                p = QPainter(cache)
+                p.setRenderHint(QPainter.SmoothPixmapTransform)
+                p.translate((dx + dw * 0.5) - wx, (dy + dh * 0.5) - wy)
+                if self._flip_h or self._flip_v:
+                    p.scale(-1.0 if self._flip_h else 1.0,
+                            -1.0 if self._flip_v else 1.0)
+                if self._rotation:
+                    p.rotate(self._rotation)
+                p.drawImage(QRectF(-dw * 0.5, -dh * 0.5, dw, dh), img)
+                p.end()
+                self._render_cache = cache
+                return
+
+            # Non-rotated: crop the visible slice of the source, then scale it
+            # to the window size (one scale per frame, not per repaint).
+            inv_x = iw / dw
+            inv_y = ih / dh
+            sx0 = int(min(iw - 1, max(0, round((wx - dx) * inv_x))))
+            sy0 = int(min(ih - 1, max(0, round((wy - dy) * inv_y))))
+            sx1 = int(min(iw, max(sx0 + 1, round((wx + ww - dx) * inv_x))))
+            sy1 = int(min(ih, max(sy0 + 1, round((wy + wh - dy) * inv_y))))
+            crop = img.copy(sx0, sy0, sx1 - sx0, sy1 - sy0)
+            if crop.width() != ww or crop.height() != wh:
+                crop = crop.scaled(ww, wh, Qt.IgnoreAspectRatio,
+                                   Qt.SmoothTransformation)
+            self._render_cache = crop
+        finally:
+            self._preparing = False
 
     def start(self) -> None:
         """Begin playback: image timer, Qt video, or OpenCV frame loop."""
@@ -549,6 +666,7 @@ class OverlayWindow(QWidget):
             # the window stays transparent for <step/fps (~1 frame).
             self._current = None
             self._presented = 0
+        self._prepare_current()
         return True
 
     def _create_audio_player(self, path: str) -> None:
@@ -644,6 +762,7 @@ class OverlayWindow(QWidget):
                 img = img.scaled(QSize(dw, dh), Qt.IgnoreAspectRatio,
                                  Qt.SmoothTransformation)
             self._current = img
+            self._prepare_current()
             self.update()
 
     def _on_qt_status(self, status) -> None:
@@ -837,6 +956,7 @@ class OverlayWindow(QWidget):
         if self._gif_frame_index >= len(self._gif_frames):
             self._gif_frame_index = len(self._gif_frames) - 1
             self._current = self._gif_frames[self._gif_frame_index]
+            self._prepare_current()
             self.update()
             if self._gif_timer is not None:
                 self._gif_timer.stop()
@@ -844,6 +964,7 @@ class OverlayWindow(QWidget):
                 self._gif_timer = None
             return
         self._current = self._gif_frames[self._gif_frame_index]
+        self._prepare_current()
         self.update()
         if self._gif_timer is not None:
             next_delay = self._gif_durations[self._gif_frame_index] / self._speed
@@ -852,6 +973,13 @@ class OverlayWindow(QWidget):
     def _load_image(self, path: str) -> QImage | None:
         try:
             img = Image.open(path).convert("RGBA")
+            if self._max_pb_h and img.height > self._max_pb_h:
+                # Performance cap: a large still is downscaled ONCE here so
+                # the render-cache build (and any chroma key) works on a
+                # smaller image instead of a full-resolution source.
+                h2 = self._max_pb_h
+                w2 = max(1, int(round(img.width * h2 / img.height)))
+                img = img.resize((w2, h2), Image.BILINEAR)
             if self._chroma_params is not None:
                 img = chroma_mod.chroma_key_image(img, self._chroma_params)
         except Exception as exc:  # Pillow raises several error types
@@ -864,10 +992,11 @@ class OverlayWindow(QWidget):
 
     def _frame_to_qimage(self, frame) -> QImage:
         if frame.ndim == 3 and frame.shape[2] == 4:
-            # BGRA -> RGBA with alpha.
-            rgba = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
-            h, w = rgba.shape[:2]
-            return QImage(rgba.data, w, h, rgba.strides[0], QImage.Format_RGBA8888).copy()
+            # BGRA bytes map directly to Qt's ARGB32 on little-endian
+            # (0xAARRGGBB -> B,G,R,A in memory) — no channel swap needed.
+            h, w = frame.shape[:2]
+            return QImage(frame.data, w, h, frame.strides[0],
+                          QImage.Format_ARGB32).copy()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w = rgb.shape[:2]
         return QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
@@ -953,6 +1082,7 @@ class OverlayWindow(QWidget):
                     self._presented += 1
                     painted = True
             if painted:
+                self._prepare_current()
                 self.update()
             return
         # Non-audio-synced kinds (plain "video"): the timer already ticks at
@@ -967,6 +1097,7 @@ class OverlayWindow(QWidget):
                 return
         self._current = self._paint_frame(frame)
         self._presented += 1
+        self._prepare_current()
         self.update()
 
     def _start_fade(self) -> None:
@@ -1030,6 +1161,7 @@ class OverlayWindow(QWidget):
             self._audio_start_watchdog.deleteLater()
             self._audio_start_watchdog = None
         self._video_clock_pending = False
+        self._render_cache = None
         self._gif_frames = []
         self._gif_frame_index = 0
         for tmp in self._temp_files:
@@ -1049,59 +1181,13 @@ class OverlayWindow(QWidget):
         self.deleteLater()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt method name
-        if self._current is None or self._current.isNull():
+        cache = self._render_cache
+        if cache is None or cache.isNull():
             return
         painter = QPainter(self)
         # Base opacity + fades: per-pixel alpha (windowOpacity is a no-op on
         # Windows layered/translucent windows - see the class docstring).
+        # The cached image is already at the window size, so this is a 1:1
+        # blit instead of a per-repaint scale.
         painter.setOpacity(self._paint_opacity_value)
-        img = self._current
-        if self._mode == "custom":
-            # Custom layout: position/scale/flip/rotate. Scale is relative to
-            # the aspect-preserving "fit" size (1,1 = whole media visible,
-            # nothing cropped); position pins edges at 0/1 and centers at 0.5;
-            # rotation is around the placed rect's center.
-            x, y, dw, dh = self._custom_target(img.width(), img.height())
-            dimg = img
-            if self._flip_h:
-                dimg = dimg.mirrored(True, False)
-            if self._flip_v:
-                dimg = dimg.mirrored(False, True)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            painter.translate(x + dw / 2.0, y + dh / 2.0)
-            painter.rotate(self._rotation)
-            painter.drawImage(QRectF(-dw / 2.0, -dh / 2.0, dw, dh), dimg)
-        elif self._mode == "stretch":
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            painter.drawImage(self.rect(), img)
-        elif self._mode == "cover-height":
-            # "Fit the entire screen horizontally": scale so the media WIDTH
-            # matches the screen width. A media proportionally taller than the
-            # screen overflows vertically -> cropped at top/bottom (Qt clips to
-            # the widget, so we can just center the target rect); a media wider
-            # than the screen aspect letterboxes top/bottom (transparent bars
-            # because the widget background is translucent).
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            scale = self.width() / img.width()
-            dw, dh = self.width(), int(img.height() * scale)
-            painter.drawImage(
-                QRect(0, (self.height() - dh) // 2, dw, dh), img)
-        elif self._mode == "cover-width":
-            # "Fit the entire screen vertically": scale so the media HEIGHT
-            # matches the screen height. A media proportionally wider than the
-            # screen overflows horizontally -> cropped at left/right; a media
-            # taller than the screen aspect letterboxes left/right.
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            scale = self.height() / img.height()
-            dw, dh = int(img.width() * scale), self.height()
-            painter.drawImage(
-                QRect((self.width() - dw) // 2, 0, dw, dh), img)
-        else:  # fit (default): preserve aspect ratio, letterbox, centered
-            scaled = img.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            painter.drawImage(
-                (self.width() - scaled.width()) // 2,
-                (self.height() - scaled.height()) // 2,
-                scaled,
-            )
+        painter.drawImage(0, 0, cache)

@@ -5,7 +5,7 @@ the media/ folder into the build output so the .exe has everything it needs
 next to it (external, user-editable config + media — no bundling).
 
 Usage:
-    .venv\\Scripts\\python build.py            # full build + copy
+    .venv\Scripts\python build.py            # full build + copy
     python build.py --skip-copy                # build only
 
 Exits 0 on success, nonzero on failure.
@@ -19,6 +19,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+TEST_EXCLUDE = {
+    # test marker files
+    "test_scare.mp4", "test_scare.png", "test_green.png", "test_scare.json",
+}
 
 ROOT = Path(__file__).resolve().parent
 SPEC = ROOT / "DYST.spec"
@@ -77,6 +82,19 @@ def _run_build() -> int:
     return 0
 
 
+def _copytree_filtered(src: Path, dst: Path) -> None:
+    """Copy src tree to dst, skipping test assets."""
+    for root, dirs, files in os.walk(src):
+        rel_root = Path(root).relative_to(src)
+        target_dir = dst / rel_root
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for fname in files:
+            if fname in TEST_EXCLUDE:
+                print(f"[copy] skipping test asset: {rel_root / fname}")
+                continue
+            shutil.copy2(Path(root) / fname, target_dir / fname)
+
+
 def _copy_runtime_files() -> int:
     """Refresh config.json and media/ inside the build output (fresh copy)."""
     for name in COPY_ITEMS:
@@ -97,13 +115,33 @@ def _copy_runtime_files() -> int:
                 continue
 
             if src.is_dir():
-                shutil.copytree(src, dst)
+                # Copy media tree while skipping test assets
+                if name == "media":
+                    _copytree_filtered(src, dst)
+                else:
+                    shutil.copytree(src, dst)
             else:
                 shutil.copy2(src, dst)
             print(f"[copy] {name} -> {DIST_DIR / name}")
         except OSError as exc:
             print(f"[copy] FAILED copying {name}: {exc}", file=sys.stderr)
             return 1
+    return 0
+
+
+def _run_build() -> int:
+    print(f"[build] PyInstaller: {sys.executable} -m PyInstaller {SPEC.name}")
+    proc = subprocess.run(
+        [sys.executable, "-m", "PyInstaller", str(SPEC), "--noconfirm", "--clean"],
+        cwd=str(ROOT),
+    )
+    if proc.returncode != 0:
+        print(f"[build] FAILED (PyInstaller exit code {proc.returncode})", file=sys.stderr)
+        return proc.returncode
+    if not (DIST_DIR / "DYST.exe").is_file():
+        print(f"[build] FAILED: output exe not found at {DIST_DIR / 'DYST.exe'}", file=sys.stderr)
+        return 1
+    print(f"[build] PyInstaller OK -> {DIST_DIR}")
     return 0
 
 

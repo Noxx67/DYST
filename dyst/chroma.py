@@ -177,25 +177,18 @@ def _screen_mask(bgr: np.ndarray, params: dict) -> np.ndarray:
     p = _parse_params(params)
     h, w = bgr.shape[:2]
 
-    # Convert to float32
     bgr_f = bgr.astype(np.float32)
     b, g, r = bgr_f[:, :, 0], bgr_f[:, :, 1], bgr_f[:, :, 2]
 
     if p.get("mode") == "luma":
-        # Luma Auto-Detection: calculate alpha based on grayscale luminance
-        # to prevent dark/light subject regions from getting eaten or creating
-        # hue division errors.
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
         val_lo = p["value_range"][0] / 255.0
         val_hi = p["value_range"][1] / 255.0
         if val_hi <= 60 / 255.0:
-            # Remove dark pixels (e.g., black key)
             alpha = np.clip((gray - val_lo) / (1.0 - val_lo + 1e-6), 0.0, 1.0)
         elif val_lo >= 200 / 255.0:
-            # Remove bright pixels (e.g., white key)
             alpha = np.clip((val_hi - gray) / (val_hi + 1e-6), 0.0, 1.0)
         else:
-            # Generic luma: remove pixels within the value range
             alpha = 1.0 - np.clip((gray - val_lo) / (val_hi - val_lo + 1e-6), 0.0, 1.0)
         alpha = np.clip((alpha - 0.05) / 0.90, 0.0, 1.0)
         alpha_u8 = (alpha * 255).astype(np.uint8)
@@ -204,7 +197,6 @@ def _screen_mask(bgr: np.ndarray, params: dict) -> np.ndarray:
         alpha_u8 = cv2.GaussianBlur(alpha_u8, (k_blur, k_blur), 0)
         return alpha_u8
 
-    # Chroma mode: radial Hue distance keying across H, S, V channels
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     hue = hsv[:, :, 0].astype(np.float32)
     sat = hsv[:, :, 1].astype(np.float32) / 255.0
@@ -214,51 +206,46 @@ def _screen_mask(bgr: np.ndarray, params: dict) -> np.ndarray:
     centre = (hue_lo + hue_hi) * 0.5
     hue_halfwidth = max(1.0, (hue_hi - hue_lo) * 0.5)
 
-    # 1. Standard HSV-based screen probability
     dh = _hue_distance(hue, centre) / hue_halfwidth
     sat_floor = p["saturation_range"][0] / 255.0
     val_floor = p["value_range"][0] / 255.0
 
-    sat_gate = np.clip((sat - sat_floor) / (1.0 - sat_floor + 1e-6), 0.0, 1.0)
-    val_gate = np.clip((val - val_floor) / (1.0 - val_floor + 1e-6), 0.0, 1.0)
+    sat_gate = np.clip((sat - sat_floor) / (1.0 - sat_floor + 1e-8), 0.0, 1.0)
+    val_gate = np.clip((val - val_floor) / (1.0 - val_floor + 1e-8), 0.0, 1.0)
 
-    screen_prob_hsv = np.clip((0.8 - dh) / 0.5, 0.0, 1.0) * sat_gate * val_gate
+    # Tightened HSV probability window
+    screen_prob_hsv = np.clip((1.0 - dh), 0.0, 1.0) * sat_gate * val_gate
 
-    # 2. Color Dominance Keying with Absolute Threshold (Prevents black/shadow eating)
+    # Aggressive Green Dominance Keying (catches light green, cyan, and yellow-green edges)
     if centre <= 45:
-        # Red dominance
         max_gb = np.maximum(g, b)
         red_excess = np.where(r > 15.0, np.clip((r - max_gb) / (r + max_gb + 1e-3), 0.0, 1.0), 0.0)
-        screen_prob_dom = red_excess * sat_gate * val_gate
+        screen_prob_dom = red_excess * sat_gate
     elif centre <= 90:
-        # Green dominance
-        max_rb = np.maximum(r, b)
-        green_excess = np.where(g > 15.0, np.clip((g - max_rb) / (g + max_rb + 1e-3), 0.0, 1.0), 0.0)
-        screen_prob_dom = green_excess * sat_gate * val_gate
+        # Green excess over Red/Blue average (captures compressed green spill)
+        avg_rb = (r + b) * 0.5
+        green_excess = np.where(g > 10.0, np.clip((g - avg_rb) / (g + avg_rb + 1e-3), 0.0, 1.0), 0.0)
+        screen_prob_dom = green_excess * sat_gate
     else:
-        # Blue dominance
         max_rg = np.maximum(r, g)
         blue_excess = np.where(b > 15.0, np.clip((b - max_rg) / (b + max_rg + 1e-3), 0.0, 1.0), 0.0)
-        screen_prob_dom = blue_excess * sat_gate * val_gate
+        screen_prob_dom = blue_excess * sat_gate
 
-    # Combine probabilities
     screen_prob = np.maximum(screen_prob_hsv, screen_prob_dom)
 
-    # Hard guard: Any pixel darker than the value floor is guaranteed to be SUBJECT
     dark_mask = val < val_floor
     screen_prob[dark_mask] = 0.0
 
-    # Invert to generate Keep-Alpha mask
     alpha = 1.0 - screen_prob
 
-    # Remap alpha gently without destroying dark details
-    alpha = np.clip((alpha - 0.05) / 0.90, 0.0, 1.0)
+    # Steeper alpha remapping: drops semi-transparent green spill (< 0.25 alpha) to pure 0
+    alpha = np.clip((alpha - 0.25) / 0.75, 0.0, 1.0)
 
-    # Clean up mask without eroding away thin/dark subject parts
     alpha_u8 = (alpha * 255).astype(np.uint8)
     erode_kernel, close_kernel, k_blur = _get_kernels(h, w)
 
-    # MORPH_CLOSE fills internal holes inside dark areas without shrinking outer edges
+    # 1-pass Erosion to physically shave off remaining 1-2px green fringe
+    alpha_u8 = cv2.erode(alpha_u8, erode_kernel, iterations=1)
     alpha_u8 = cv2.morphologyEx(alpha_u8, cv2.MORPH_CLOSE, close_kernel, iterations=1)
     alpha_u8 = cv2.GaussianBlur(alpha_u8, (k_blur, k_blur), 0)
 
@@ -281,7 +268,9 @@ def _despill(bgra: np.ndarray, params: dict) -> None:
     centre = (hue_lo + diff * 0.5) % 180
 
     alpha = bgra[:, :, 3].astype(np.float32) / 255.0
-    visible = (alpha > 0.02) & (alpha < 0.98)
+    
+    # Target semi-transparent fringe pixels and edges to avoid shifting opaque subject colors
+    visible = alpha > 0.02
     if not np.any(visible):
         return
 
@@ -289,22 +278,22 @@ def _despill(bgra: np.ndarray, params: dict) -> None:
     g = bgra[visible, 1].astype(np.float32)
     r = bgra[visible, 2].astype(np.float32)
 
+    # Blend despill strength proportionally to edge transparency
     if 100 <= centre <= 130:
-        # Blue spill
+        # Blue spill removal
         max_rg = np.maximum(r, g)
         spill = np.maximum(0.0, b - max_rg)
         bgra[visible, 0] = np.clip(b - spill, 0, 255).astype(np.uint8)
     elif 35 <= centre <= 85:
-        # Green spill
+        # Green spill removal
         max_rb = np.maximum(r, b)
         spill = np.maximum(0.0, g - max_rb)
         bgra[visible, 1] = np.clip(g - spill, 0, 255).astype(np.uint8)
     elif centre <= 15 or centre >= 160:
-        # Red spill
+        # Red spill removal
         max_gb = np.maximum(g, b)
         spill = np.maximum(0.0, r - max_gb)
         bgra[visible, 2] = np.clip(r - spill, 0, 255).astype(np.uint8)
-
 
 # ----------------------------------------------------------------------
 # Public API

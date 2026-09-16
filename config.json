@@ -1,8 +1,8 @@
 {
   "_comment": "DYST global settings. Every value here can be overridden per media file with a same-named sidecar (.json/.txt next to the media). Key order groups: Core loop -> Media & playback -> Audio -> Display & layout -> Chroma key -> System; related keys stay adjacent. Every key is explained in the _hints block at the bottom, including how it interacts with the per-file sidecar keys (see config_template.json for the per-file reference). Bad values are ignored with a warning, never crash the app.",
-  "tick_seconds": 1,
+  "tick_seconds": 0.3,
   "odds": 3,
-  "max_concurrent": 5,
+  "max_concurrent": 10,
   "play_once": false,
   "reroll_in_same_tick": true,
   "media_folder": "media",

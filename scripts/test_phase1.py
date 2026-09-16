@@ -22,7 +22,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import Qt, QRect  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from dyst import config as cfg, media  # noqa: E402
@@ -125,28 +125,28 @@ def main() -> int:
     assert "custom" in media.VALID_MODES, media.VALID_MODES
     print("PASS custom mode recognised")
     w = OverlayWindow()
-    w.setGeometry(0, 0, 1000, 500)
+    w._screen_rect = QRect(0, 0, 1000, 500)
     assert w.load(img_item.path, "image", image_seconds=0.2, fade_out_seconds=0.05,
                   mode="custom", custom={"position_x": 0.0, "position_y": 0.0,
                                          "scale_x": 0.5, "scale_y": 1.0})
     assert w._mode == "custom"
-    x, y, dw, dh = w._custom_target(100, 100)
+    x, y, dw, dh = w._media_display_rect(100, 100)
     assert (dw, dh) == (250.0, 500.0), (dw, dh)
     assert (x, y) == (0.0, 0.0), (x, y)  # 0/0 pins top-left
     w._position_x, w._position_y = 1.0, 1.0
-    x, y, dw, dh = w._custom_target(100, 100)
+    x, y, dw, dh = w._media_display_rect(100, 100)
     assert x == 750.0 and y == 0.0, (x, y)  # right edge at screen right
     # Positions beyond 0..1 are allowed (clamped to -1..2) so media can
     # peek in / be cropped at the screen edges. Add vertical slack
     # (scale_y=0.5 -> disp_h=250) so y can actually move in a 500px window.
     w._scale_y = 0.5
     w._position_x, w._position_y = 1.5, 2.0
-    x, y, dw, dh = w._custom_target(100, 100)
+    x, y, dw, dh = w._media_display_rect(100, 100)
     assert (dw, dh) == (250.0, 250.0), (dw, dh)
     assert x == 1125.0, x  # (1000-250) * 1.5: pokes past the right edge (cropped)
     assert y == 500.0, y  # (500-250) * 2: fully below the screen bottom
     w._position_x = -1.0
-    x, _, _, _ = w._custom_target(100, 100)
+    x, _, _, _ = w._media_display_rect(100, 100)
     assert x == -750.0, x  # pushed all the way off-screen left
     w._finish_close()
     print("PASS custom position range -1..2 (peek/crop off-screen)")
@@ -161,7 +161,7 @@ def main() -> int:
     # Flip + rotation render without crashing, and the result isn't fully
     # transparent (the red square must still land somewhere on the widget).
     w = OverlayWindow()
-    w.setGeometry(0, 0, 400, 400)
+    w._screen_rect = QRect(0, 0, 400, 400)
     assert w.load(img_item.path, "image", image_seconds=0.2, fade_out_seconds=0.05,
                   mode="custom", custom={"flip_h": True, "flip_v": True,
                                          "rotation": 45.0, "scale_x": 0.5,

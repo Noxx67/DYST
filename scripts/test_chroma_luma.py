@@ -53,6 +53,26 @@ def test_parse_params():
     print("test_parse_params: PASS")
 
 
+def test_despill_covers_near_opaque_border():
+    # Green spill on a fully/near-opaque subject edge must be neutralized too
+    # (an earlier version only desaturated semi-transparent pixels, which left
+    # green fringes on subject borders like the FNAF jumpscare).
+    bgra = np.zeros((2, 2, 4), dtype=np.uint8)
+    bgra[:, :] = (0, 200, 0, 255)  # BGR = pure green, alpha = opaque
+    params = {"preset": "green", "hue_range": [35, 85],
+              "saturation_range": [40, 255], "value_range": [40, 255],
+              "despill": True}
+    chroma_mod._despill(bgra, params)
+    assert bgra[0, 0, 1] == 0, f"green not despilled on opaque pixel: {bgra[0, 0, 1]}"
+    assert bgra[0, 0, 3] == 255, "alpha must be untouched"
+    # luma (black/white) keying must NOT despill at all
+    bgra2 = np.zeros((2, 2, 4), dtype=np.uint8)
+    bgra2[:, :] = (0, 200, 0, 128)
+    chroma_mod._despill(bgra2, {"preset": "black", "despill": True})
+    assert bgra2[0, 0, 1] == 200, "luma keying should disable despill"
+    print("test_despill_covers_near_opaque_border: PASS")
+
+
 def test_mask_and_despill():
     # Black luma key on a dark image
     img = np.zeros((10, 10, 3), dtype=np.uint8)
@@ -111,5 +131,6 @@ def test_mask_and_despill():
 
 if __name__ == "__main__":
     test_parse_params()
+    test_despill_covers_near_opaque_border()
     test_mask_and_despill()
     print("All chroma luma tests passed.")
