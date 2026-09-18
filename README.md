@@ -1,7 +1,8 @@
 # DYST (did you see that? 👀)
 
 A Windows background app — at random intervals it plays an image or video on top of whatever you're doing, then disappears.
-No window, no taskbar icon, no focus steal; it overlays directly on the screen.
+No window, no taskbar icon, no focus steal; it overlays directly on the screen, with a
+hidden tray icon as the only visible handle on it (Pause / Quit).
 
 ---
 
@@ -204,7 +205,8 @@ opened before it was installed.
 
 When an overlay triggers (a roll succeeds, or you use `--test` / `--play`):
 
-1. A **fullscreen window** is created on the primary monitor:
+1. A **fullscreen window** is created on the configured `monitor` — `"primary"`,
+   a 0-based index, or `"all"` (a random screen picked per overlay):
    - **no window chrome** (frameless), **no taskbar button / Alt-Tab entry**
      (`Qt.Tool`), **always on top**, **never steals focus**, and
      **click-through** (clicks pass to whatever is underneath).
@@ -268,6 +270,22 @@ without console error spam. This needs `ffmpeg` on the machine (which the
 downloader requires anyway). Temporary audio files are cleaned up after
 playback.
 
+### Tray icon (Pause / Quit)
+
+A hidden **tray icon** is the only visible handle on the app. Right-click it
+for a two-item menu:
+
+- **Pause / Resume** — toggles the chance loop. While paused, **no media can
+  appear**, and anything currently on screen is dismissed immediately. The menu
+  label flips to *Resume* and the icon tooltip reads *paused*.
+- **Quit** — exits the app entirely (same clean shutdown as the kill switch:
+  hotkey unregistered, watchdog stopped, tray removed).
+
+The tray is created in `--daemon` mode only (`python main.py`, `run.bat`, or
+the background launcher). `--no-tray` runs the daemon without it
+(headless/debug). If `pystray` or the icon asset is missing, the app still
+runs — it just logs a warning and continues without a tray icon.
+
 ### Kill switch (dead man's switch)
 
 Press `kill_hotkey` (default **`ctrl+shift+alt+k`**) at any time and DYST
@@ -303,7 +321,8 @@ not responding at all.
 |---|---|
 | `--test` | Pick one random media file, play it, exit. Great for trying things. |
 | `--play PATH` | Play a specific file, then exit. |
-| `--daemon` | Run the chance loop (ticks every `tick_seconds`, rolls `1/odds`, spawns overlays) with no tray icon yet. Ctrl+C / kill to stop. |
+| `--daemon` | Run the chance loop (ticks every `tick_seconds`, rolls `1/odds`, spawns overlays) with a **tray icon** (Pause / Quit). Ctrl+C / kill also stops it. |
+| `--no-tray` | Same as `--daemon` but without the tray icon (headless/debug). |
 | `--roll` | Print one simulated roll result and exit (headless sanity check). |
 | `--config PATH` | Use a different config file (default `config.json`). |
 
@@ -383,7 +402,7 @@ Result: `dist/DYST/DYST.exe` (~260 MB with dependencies).
 
 - **Phase 2** — media validation (skip corrupt files), sidecar audio files ✅ done
 - **Phase 3** — chroma key (green-screen removal) ✅ done (despill on by default, hole-filling, auto hue calibration, one-time cached audio)
-- **Phase 4** — overlay polish (GIF/APNG animation, monitor selection)
-- **Phase 5** — overlay manager (global max concurrency) + full audio
-- **Phase 6** — tray icon, autostart, test-trigger menu
+- **Phase 4** — overlay polish (GIF/APNG animation ✅, monitor selection ✅ incl. `"all"` random screen)
+- **Phase 5** — overlay manager (global max concurrency) + full audio ✅ done
+- **Phase 6** — tray icon (Pause / Quit ✅; Test Trigger / autostart toggle still to come), autostart ✅ done
 - **Phase 7** — packaging + this doc becoming the real user README

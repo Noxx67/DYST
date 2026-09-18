@@ -1156,6 +1156,14 @@ class OverlayWindow(QWidget):
         self._fade.setEndValue(0.0)
         self._fade.start()
 
+    def dismiss(self) -> None:
+        """Close the overlay immediately (no fade), stopping its audio too.
+
+        Public entry point for the tray's Pause action; emits `finished` via
+        the normal one-shot teardown path.
+        """
+        self._finish_close()
+
     def _finish_close(self) -> None:
         # One-shot guard: natural end (fade finished) and max_duration can race
         # (max fires mid-fade); only run teardown + emit `finished` once.

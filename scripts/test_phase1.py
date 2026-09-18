@@ -114,6 +114,20 @@ def main() -> int:
     assert not win.isVisible(), "image overlay still visible after finish"
     print("PASS image overlay: shown -> auto-dismissed (%.2fs)" % 0.2)
 
+    # 2b. dismiss(): immediate close, no fade (the tray Pause path)
+    w = OverlayWindow()
+    assert w.load(img_item.path, "image", image_seconds=10.0, fade_out_seconds=1.0)
+    w.show(); w.start()
+    _flag = {"done": False}
+    w.finished.connect(lambda: _flag.update(done=True))
+    t0 = time.time()
+    w.dismiss()
+    app.processEvents()
+    assert _flag["done"], "dismiss() did not emit finished"
+    assert not w.isVisible(), "overlay still visible after dismiss()"
+    assert time.time() - t0 < 0.5, "dismiss() should be instant (no fade)"
+    print("PASS dismiss(): instant close, emits finished (tray pause path)")
+
     # 3. Video overlay (frame loop to end)
     win = OverlayWindow()
     assert win.load(vid_item.path, "video", fade_out_seconds=0.1)

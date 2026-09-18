@@ -4,7 +4,8 @@ Modes:
   --roll        simulate one odds roll and print the result (headless)
   --test        play one random media file from the media folder, then exit
   --play PATH   play a specific file, then exit
-  --daemon      run the chance loop (ticker + overlays) without a tray yet
+  --daemon      run the chance loop (ticker + overlays) with a tray icon
+  --no-tray     run the daemon without the tray icon (headless/debug)
   (no flag)     status print (safe headless)
 """
 
@@ -372,9 +373,8 @@ def _handle_autostart(config: dict, args) -> bool:
     return True
 
 
-def _run_daemon(app, config: dict) -> None:
-    """Chance loop without tray: ticker + overlays. Manager (global concurrency,
-    audio) lands in Phase 5.
+def _run_daemon(app, config: dict, use_tray: bool = True) -> None:
+    """Chance loop: ticker + overlays + tray icon (Pause/Resume + Quit).
 
     Chroma-video lazy pre-processing: when a trigger picks an uncached chroma
     video, the ticker PAUSES, the video is preprocessed in a worker thread
@@ -469,10 +469,15 @@ def _run_daemon(app, config: dict) -> None:
         entry = precache_jobs.pop(key, None)
         if entry:
             entry["sig"] = None  # allow the signal bridge to be GC'd now
-        # Resume the chance loop once no preprocessing job remains.
+        # Resume the chance loop once no preprocessing job remains — unless
+        # the user paused from the tray while the job was running.
         if not precache_jobs and ticker_holder and ticker_holder[0]:
-            log.info("precache: done — chance loop resumed")
-            ticker_holder[0].start()
+            tray = getattr(app, "_tray", None)
+            if tray is not None and tray.paused:
+                log.debug("precache: done but the tray is PAUSED — loop stays paused")
+            else:
+                log.info("precache: done — chance loop resumed")
+                ticker_holder[0].start()
         if entry:
             # Cache is ready now (or preprocessing failed — _spawn_overlay
             # falls back to live keying); spawn everything that was queued.
@@ -578,6 +583,34 @@ def _run_daemon(app, config: dict) -> None:
     app._ticker = ticker  # keep alive & parented to app
     ticker_holder.append(ticker)  # spawner can pause/resume for preprocessing
     ticker.start()
+
+    # Tray icon: the only visible handle on the app. Pause stops the chance
+    # loop AND dismisses whatever is on screen; Quit exits cleanly.
+    if use_tray:
+        from dyst.tray import Tray
+
+        def _on_tray_pause(paused: bool) -> None:
+            if paused:
+                ticker.stop()
+                for win in list(overlays):
+                    try:
+                        win.dismiss()
+                    except Exception:
+                        log.debug("tray: overlay dismiss failed", exc_info=True)
+                log.info("tray: PAUSED — no media will appear until resumed")
+            else:
+                if precache_jobs:
+                    # A one-time precache paused the loop; resuming is handled
+                    # by _on_precache_done when the job finishes.
+                    log.debug("tray: resume requested while precache runs — "
+                              "the loop resumes afterwards")
+                else:
+                    ticker.start()
+                    log.info("tray: RESUMED")
+
+        app._tray = Tray(app, on_pause=_on_tray_pause, on_quit=app.quit, parent=app)
+        app._tray.start()
+
     log.info("daemon: running (odds=1/%s, tick=%ss)",
              config["odds"], config["tick_seconds"])
     if not pool:
@@ -689,11 +722,16 @@ def _run_qt(config: dict, args) -> int:
         log.info("test: playing %s (%s)", item.path, item.kind)
 
     elif args.daemon:
-        _run_daemon(app, config)
+        _run_daemon(app, config, use_tray=not getattr(args, "no_tray", False))
 
     try:
         return app.exec()
     finally:
+        # Tear the tray icon down first so a leftover icon can never outlive
+        # the process (daemon mode only; None otherwise).
+        tray = getattr(app, "_tray", None)
+        if tray is not None:
+            tray.stop()
         # Cleanup hotkey on exit — MUST run after the event loop, otherwise
         # the kill switch unregisters itself before it can ever fire.
         if _hotkey_registered:
@@ -712,7 +750,9 @@ def main(argv=None) -> int:
                         help="play one random media file, then exit")
     parser.add_argument("--play", metavar="PATH", help="play a specific media file, then exit")
     parser.add_argument("--daemon", action="store_true",
-                        help="run the chance loop (ticker) without a tray icon")
+                        help="run the chance loop (ticker) with a tray icon")
+    parser.add_argument("--no-tray", action="store_true",
+                        help="run the daemon without the tray icon (headless/debug)")
     parser.add_argument("--roll", action="store_true",
                         help="simulate one roll and print the result")
     # Internal: detached notification helper (see dyst/notify.py), used so a
