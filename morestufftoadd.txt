@@ -46,3 +46,7 @@ stuff to add later:
     idk what else to add for now. maybe a release build when most of the things work.
 
     way to test play the media for the .exe executor
+
+    GUI for the media configuration to test it and stuff.
+
+    a server to host the media and media packs of the user. shit must include security too for nsfw stuff and image exploits/zip bombs ig

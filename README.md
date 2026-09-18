@@ -281,6 +281,20 @@ and how to get it back. The balloon is drawn by a tiny detached helper
 process (`dyst/notify.py`), so it stays on screen even though DYST has
 already exited. Set `kill_notify` to `false` to quit silently.
 
+The hotkey is detected twice, so it works even when DYST is wedged:
+
+- **in-process** (`dyst/hotkey.py`, a 50 ms Qt poll) fires while the app is
+  healthy and quits it normally;
+- **out-of-process** (`dyst/killswitch.py`, a 50 ms Win32 poll in a tiny
+  detached helper process) is immune to a frozen GUI thread. It waits ~1.5 s
+  for the app to quit on its own — the in-process poller usually gets there
+  first — and then **force-terminates it** (`TerminateProcess`), which works
+  on a fully hung process. The helper exits by itself as soon as DYST is
+  gone, so a normal quit never leaves it behind.
+
+So a stuck overlay can always be cleared with the hotkey, even if the app is
+not responding at all.
+
 ---
 
 ## CLI reference

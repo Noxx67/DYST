@@ -24,6 +24,12 @@ How it works (Windows):
     (prevents other apps from capturing it), plus a QTimer that
     polls GetAsyncKeyState every 50ms with edge detection. This
     avoids PySide6 native event filter reliability issues.
+
+    Because that QTimer lives on the GUI thread it cannot fire while
+    the app is wedged. `dyst/killswitch.py` therefore runs a second,
+    independent 50 ms poll in a detached process and force-terminates
+    the app if it does not quit within a short grace period — see
+    `killswitch.start()`.
 """
 
 from __future__ import annotations
@@ -45,19 +51,9 @@ if sys.platform == "win32":
     MOD_SHIFT = 0x0004
     MOD_WIN = 0x0008
 
-    # Virtual key codes for common keys.
-    VK_CODES = {
-        'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73,
-        'f5': 0x74, 'f6': 0x75, 'f7': 0x76, 'f8': 0x77,
-        'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
-        'a': 0x41, 'b': 0x42, 'c': 0x43, 'd': 0x44, 'e': 0x45,
-        'f': 0x46, 'g': 0x47, 'h': 0x48, 'i': 0x49, 'j': 0x4A,
-        'k': 0x4B, 'l': 0x4C, 'm': 0x4D, 'n': 0x4E, 'o': 0x4F,
-        'p': 0x50, 'q': 0x51, 'r': 0x52, 's': 0x53, 't': 0x54,
-        'u': 0x55, 'v': 0x56, 'w': 0x57, 'x': 0x58, 'y': 0x59, 'z': 0x5A,
-        '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
-        '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
-    }
+    # Hotkey parsing (modifier bits, VK codes) is shared with the
+    # out-of-process watchdog — see dyst/killswitch.py.
+    from dyst.killswitch import parse_hotkey  # noqa: F401
 
     _user32 = ctypes.windll.user32
     _HOTKEY_ID = 0x5542  # arbitrary unique ID for DYST
@@ -67,35 +63,6 @@ if sys.platform == "win32":
     _callback = None
     _timer = None
     _prev_keys = 0
-
-    def parse_hotkey(hotkey_str: str) -> tuple[int, int]:
-        """Parse a hotkey string like 'ctrl+shift+alt+k' into (modifiers, vk_code).
-
-        Modifiers: ctrl, shift, alt, win (or super/meta).
-        Key: any supported letter (a-z) or digit (0-9) or F1-F12.
-        Returns (modifiers_bitmask, virtual_key_code).
-        """
-        parts = hotkey_str.strip().lower().split('+')
-        if len(parts) < 2:
-            raise ValueError("need at least a modifier + key (e.g. ctrl+k)")
-        mods = 0
-        for mod in parts[:-1]:
-            mod = mod.strip()
-            if mod == "ctrl":
-                mods |= MOD_CONTROL
-            elif mod == "shift":
-                mods |= MOD_SHIFT
-            elif mod == "alt":
-                mods |= MOD_ALT
-            elif mod in ("win", "super", "meta"):
-                mods |= MOD_WIN
-            else:
-                raise ValueError(f"unknown modifier: {mod}")
-        key = parts[-1].strip()
-        vk = VK_CODES.get(key)
-        if vk is None:
-            raise ValueError(f"unsupported key: {key!r} (use a-z, 0-9, or f1-f12)")
-        return mods, vk
 
     def register_hotkey(hotkey_str: str, callback) -> bool:
         """Register a global hotkey that fires *callback* when pressed.

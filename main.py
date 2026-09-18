@@ -20,6 +20,7 @@ import sys
 
 from dyst import __version__, chroma as chroma_mod, config as cfg, media, precache as precache_mod
 from dyst.hotkey import register_hotkey, unregister_hotkey, HotkeyFilter
+from dyst import killswitch
 from dyst import notify
 from dyst.media import _parse_txt_settings, _validate_settings
 
@@ -614,6 +615,18 @@ def _run_qt(config: dict, args) -> int:
     if _hotkey_registered:
         log.info("main: kill hotkey active (%s)", kill_hotkey)
 
+    # Out-of-process watchdog: the poller above lives on the GUI thread, so
+    # it never fires when the app is wedged (stuck overlay, hung decode).
+    # This detached process watches the same combo and force-terminates us
+    # if we don't exit within the grace period (see dyst/killswitch.py).
+    _watchdog_started = False
+    if _hotkey_registered:
+        _watchdog_started = killswitch.start(
+            kill_hotkey, notify_enabled=config.get("kill_notify", True))
+        if _watchdog_started:
+            log.info("main: kill-switch watchdog active (force-kill after %ss "
+                     "if unresponsive)", killswitch.GRACE_SECONDS)
+
     if args.play:
         path = args.play
         kind = media.kind_of(path)
@@ -684,6 +697,10 @@ def _run_qt(config: dict, args) -> int:
         if _hotkey_registered:
             unregister_hotkey()
             hotkey_filter.setEnabled(False)
+        # The watchdog exits by itself when this process dies; terminate it
+        # now anyway so a normal quit never leaves a stray helper behind.
+        if _watchdog_started:
+            killswitch.stop()
 
 
 def main(argv=None) -> int:
@@ -700,12 +717,28 @@ def main(argv=None) -> int:
     # notification can outlive the app (kill switch). Not for human use.
     parser.add_argument("--notify", nargs=3, metavar=("TITLE", "MESSAGE", "TIMEOUT_MS"),
                         help=argparse.SUPPRESS)
+    # Internal: detached kill-switch watchdog (see dyst/killswitch.py). The
+    # separate process must be able to kill us even when we are wedged.
+    parser.add_argument("--killwatchdog", nargs=4,
+                        metavar=("HOTKEY", "PID", "GRACE_MS", "NOTIFY"),
+                        help=argparse.SUPPRESS)
     parser.add_argument("--autostart", action="store_true",
                         help="(written by the app itself into the Windows Run key) "
                              "marks a boot-launch so the app can self-remove when config says off")
     default_config_path = os.path.join(get_base_dir(), "config.json")
     parser.add_argument("--config", default=default_config_path, help="path to config file")
     args = parser.parse_args(argv)
+
+    if args.killwatchdog:
+        hotkey, pid, grace_ms, notify_flag = args.killwatchdog
+        try:
+            grace = float(grace_ms) / 1000.0
+            parent_pid = int(pid)
+        except ValueError:
+            print("ERROR: bad --killwatchdog arguments")
+            return 1
+        return killswitch.run(hotkey, parent_pid, grace,
+                              str(notify_flag) not in ("0", "false", "False"))
 
     if args.notify:
         try:
