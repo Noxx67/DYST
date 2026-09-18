@@ -79,7 +79,7 @@ with a warning, never crash the app.
   "max_playback_height": 480,  // cap decode/key/paint height (px): taller videos/GIFs are downscaled keeping aspect (stable playback for high-res clips); 0 = native
   "max_playback_fps": 30,      // cap effective playback fps (videos; frame-sampled, audio untouched); 0 = native
 
-  "monitor": "primary",         // which screen: "primary" or 0-based index
+  "monitor": "primary",         // which screen: "primary" | "all" (random monitor per overlay) | 0-based index
   "mode": "fit",                // how media covers the screen: fit (default) | stretch | cover-height | cover-width | custom
 
   // Only used when "mode": "custom" (per-file sidecar values win):

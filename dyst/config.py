@@ -242,7 +242,7 @@ def _is_gain(v: Any) -> bool:
 
 def _is_monitor(v: Any) -> bool:
     if isinstance(v, str):
-        return v == "primary"
+        return v.strip().lower() in ("primary", "all")
     if isinstance(v, int) and not isinstance(v, bool):
         return v >= 0
     return False

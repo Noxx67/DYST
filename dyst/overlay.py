@@ -14,9 +14,9 @@ Playback kinds:
                             from dyst.precache (fast path; audio may be the
                             cached one-time extraction)
 
-Monitor selection: the global `monitor` config key ("primary" or a
-0-based monitor index) is resolved to a QScreen in __init__; an invalid
-value falls back to the primary screen.
+Monitor selection: the global `monitor` config key ("primary", "all" or a
+0-based monitor index) is resolved to a QScreen in __init__; "all" picks a
+random monitor per overlay, and an invalid value falls back to primary.
 """
 
 from __future__ import annotations
@@ -42,15 +42,21 @@ log = logging.getLogger("dyst.overlay")
 def resolve_screen(monitor: object):
     """Return the QScreen for a `monitor` config value, or None.
 
-    Accepts "primary" (default) or a 0-based monitor index. Any invalid or
-    out-of-range value logs a warning and falls back to the primary screen,
-    so a stale config can never crash a spawn.
+    Accepts "primary" (default), "all" (pick a monitor at random for THIS
+    overlay) or a 0-based monitor index. Any invalid or out-of-range value
+    logs a warning and falls back to the primary screen, so a stale config
+    can never crash a spawn.
     """
     screens = QApplication.screens()
     if not screens:
         return None
-    if isinstance(monitor, str) and monitor.strip().lower() == "primary":
-        return QApplication.primaryScreen()
+    if isinstance(monitor, str):
+        name = monitor.strip().lower()
+        if name == "primary":
+            return QApplication.primaryScreen()
+        if name == "all":
+            # Spread overlays across every monitor: each spawn rolls its own.
+            return random.choice(screens)
     # bool is an int subclass; treat it as invalid rather than index 0/1.
     if isinstance(monitor, int) and not isinstance(monitor, bool):
         if 0 <= monitor < len(screens):
@@ -58,7 +64,7 @@ def resolve_screen(monitor: object):
         log.warning("overlay: monitor index %d out of range (%d screen(s)) — using primary",
                     monitor, len(screens))
     else:
-        log.warning("overlay: invalid monitor %r (use 'primary' or an index) — using primary",
+        log.warning("overlay: invalid monitor %r (use 'primary', 'all' or an index) — using primary",
                     monitor)
     return QApplication.primaryScreen()
 

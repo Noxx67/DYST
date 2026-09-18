@@ -67,6 +67,7 @@ icon.ico
 .coverage
 htmlcov/
 .cache/
+.work/
 
 # pi coding-agent workspace settings
 .pi/

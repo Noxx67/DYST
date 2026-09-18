@@ -43,6 +43,25 @@ def reg_value():
         return None
 
 
+def _kill_tree(pid, attempts=3, timeout=10):
+    """Force-kill a process tree, tolerating slow/refusing taskkill.
+
+    The venv launcher re-execs a child python, so `taskkill /T` is needed to
+    avoid orphaned daemons; on a busy machine taskkill can exceed a short
+    timeout, so retry instead of letting the harness die.
+    """
+    for _ in range(attempts):
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=timeout)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError:
+            return
+
+
 def boot(cmd, kill_after=3.0):
     """Launch cmd, kill after kill_after (taskkill works on GUI apps).
     Returns (elapsed_ms, captured_stdout)."""
@@ -52,12 +71,12 @@ def boot(cmd, kill_after=3.0):
     try:
         proc.wait(timeout=kill_after)
     except subprocess.TimeoutExpired:
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        _kill_tree(proc.pid)
         try:
-            proc.wait(timeout=3)
+            proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+            _kill_tree(proc.pid)
     out = b""
     if proc.stdout is not None:
         try:

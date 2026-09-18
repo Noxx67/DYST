@@ -101,7 +101,7 @@ def main() -> int:
         f.write(b"ID3 fake mp3 bytes")
     # settings sidecar still works
     with open(os.path.join(imgs, "good.json"), "w") as f:
-        f.write('{"mode": "cover", "duration": 2}')
+        f.write('{"mode": "cover-height", "duration": 2}')
 
     pool = media.scan(td)
     names = {os.path.basename(i.path) for i in pool}
@@ -124,14 +124,14 @@ def main() -> int:
     print("PASS sidecar pairing (same folder, case-insensitive, .mp3>.wav precedence)")
 
     # 3. settings attach (regression)
-    assert by_name["good.png"].settings.get("mode") == "cover"
+    assert by_name["good.png"].settings.get("mode") == "cover-height"
     assert by_name["good.png"].settings.get("duration") == 2
     print("PASS settings sidecar still attaches")
 
     # 4. image + sidecar: overlay plays with audio player and finishes
     win = OverlayWindow()
     item = by_name["good.png"]
-    assert win.load(item.path, "image", image_seconds=0.5, fade_seconds=0.1,
+    assert win.load(item.path, "image", image_seconds=0.5, fade_out_seconds=0.1,
                     sidecar_audio=item.sidecar_audio)
     assert win._audio_player is not None, "sidecar audio player missing for image"
     win.show()
@@ -142,7 +142,7 @@ def main() -> int:
     # 5. video-av1 + sidecar: sidecar is the audio source, no temp extraction
     vid_item = by_name["good.mp4"]
     win = OverlayWindow()
-    assert win.load(vid_item.path, "video-av1", fade_seconds=0.1,
+    assert win.load(vid_item.path, "video-av1", fade_out_seconds=0.1,
                     sidecar_audio=os.path.join(imgs, "good.wav"))
     assert win._audio_player is not None
     assert win._temp_audio is None, "sidecar should avoid temp extraction"

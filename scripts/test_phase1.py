@@ -66,9 +66,10 @@ def main() -> int:
     vid_item = media.MediaItem(
         os.path.join(ROOT, "media", "videos", "test_scare.mp4"), "video")
 
-    # 1b. monitor selection (global `monitor` config: 'primary' or an index).
-    # We can only exercise the fallback logic here (single-monitor CI), but it
-    # guards against a stale/invalid index crashing a spawn.
+    # 1b. monitor selection (global `monitor` config: 'primary', 'all' or an
+    # index). We can only exercise the fallback/random logic here
+    # (single-monitor CI), but it guards against a stale/invalid index
+    # crashing a spawn.
     from dyst.overlay import resolve_screen
     screens = QApplication.screens()
     assert screens, "no screens detected"
@@ -77,7 +78,16 @@ def main() -> int:
     assert resolve_screen(999) is QApplication.primaryScreen()      # out of range
     assert resolve_screen("ultrawide") is QApplication.primaryScreen()  # bad name
     assert resolve_screen(True) is QApplication.primaryScreen()     # bool is not an index
-    print("PASS monitor: 'primary'/index resolve, invalid falls back to primary")
+    # 'all' = random monitor per overlay: always a valid screen (with one
+    # monitor it must always be that one).
+    assert all(resolve_screen("all") in screens for _ in range(50))
+    assert resolve_screen("ALL") in screens      # case-insensitive
+    print("PASS monitor: 'primary'/index/'all' resolve, invalid falls back to primary")
+
+    # config validation accepts 'all' (and rejects junk)
+    assert cfg._is_monitor("all") and cfg._is_monitor(" ALL ") and cfg._is_monitor("primary")
+    assert cfg._is_monitor(0) and not cfg._is_monitor(True) and not cfg._is_monitor("ultrawide")
+    print("PASS monitor: config validation accepts 'all'")
 
     # 1c. selected-monitor origin is applied to window geometry (local rects +
     # screen offset), so an overlay lands on the right screen.
