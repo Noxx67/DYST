@@ -14,7 +14,9 @@ Playback kinds:
                             from dyst.precache (fast path; audio may be the
                             cached one-time extraction)
 
-Monitor selection is NOT implemented yet (always primary).
+Monitor selection: the global `monitor` config key ("primary" or a
+0-based monitor index) is resolved to a QScreen in __init__; an invalid
+value falls back to the primary screen.
 """
 
 from __future__ import annotations
@@ -35,6 +37,30 @@ from dyst import chroma as chroma_mod
 from dyst import ffmpeg_util
 
 log = logging.getLogger("dyst.overlay")
+
+
+def resolve_screen(monitor: object):
+    """Return the QScreen for a `monitor` config value, or None.
+
+    Accepts "primary" (default) or a 0-based monitor index. Any invalid or
+    out-of-range value logs a warning and falls back to the primary screen,
+    so a stale config can never crash a spawn.
+    """
+    screens = QApplication.screens()
+    if not screens:
+        return None
+    if isinstance(monitor, str) and monitor.strip().lower() == "primary":
+        return QApplication.primaryScreen()
+    # bool is an int subclass; treat it as invalid rather than index 0/1.
+    if isinstance(monitor, int) and not isinstance(monitor, bool):
+        if 0 <= monitor < len(screens):
+            return screens[monitor]
+        log.warning("overlay: monitor index %d out of range (%d screen(s)) — using primary",
+                    monitor, len(screens))
+    else:
+        log.warning("overlay: invalid monitor %r (use 'primary' or an index) — using primary",
+                    monitor)
+    return QApplication.primaryScreen()
 
 
 class OverlayWindow(QWidget):
@@ -64,7 +90,7 @@ class OverlayWindow(QWidget):
     finished = Signal()
     FRAME_MS = 33  # ≈30 fps video playback
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, monitor: object = "primary"):
         super().__init__(parent)
         self._path: str | None = None
         self._kind: str | None = None
@@ -140,7 +166,7 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
 
         self._screen_rect = QRect(0, 0, 1920, 1080)
-        screen = QApplication.primaryScreen()
+        screen = resolve_screen(monitor)
         if screen is not None:
             self._screen_rect = screen.geometry()
             # Start tiny; _prepare_current() resizes the window to the media's
@@ -483,9 +509,12 @@ class OverlayWindow(QWidget):
                 self._render_cache = None
                 return
             wx, wy, ww, wh = self._window_rect(dx, dy, dw, dh)
+            # _window_rect() is in screen-local coords; add the selected
+            # monitor's origin so the window lands on the right screen.
+            ox, oy = self._screen_rect.x(), self._screen_rect.y()
             cur = self.geometry()
-            if (cur.x(), cur.y(), cur.width(), cur.height()) != (wx, wy, ww, wh):
-                self.setGeometry(wx, wy, ww, wh)
+            if (cur.x(), cur.y(), cur.width(), cur.height()) != (wx + ox, wy + oy, ww, wh):
+                self.setGeometry(wx + ox, wy + oy, ww, wh)
 
             if self._mode == "custom" and (self._rotation or self._flip_h or self._flip_v):
                 cache = QImage(ww, wh, QImage.Format_ARGB32_Premultiplied)

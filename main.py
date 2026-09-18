@@ -308,7 +308,9 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
         image_seconds = config["image_display_seconds"]
         fade_out_seconds = config["fade_out_seconds"]
         fade_in_seconds = 0.0  # videos don't fade in (they also end instantly)
-    win = OverlayWindow()
+    # Monitor: global-only config ("primary" or a 0-based index). The overlay
+    # resolves it to a QScreen and falls back to primary on bad values.
+    win = OverlayWindow(monitor=config.get("monitor", "primary"))
     if not win.load(item.path, kind,
                     image_seconds=image_seconds,
                     fade_out_seconds=fade_out_seconds,

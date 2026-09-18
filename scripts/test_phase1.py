@@ -66,6 +66,27 @@ def main() -> int:
     vid_item = media.MediaItem(
         os.path.join(ROOT, "media", "videos", "test_scare.mp4"), "video")
 
+    # 1b. monitor selection (global `monitor` config: 'primary' or an index).
+    # We can only exercise the fallback logic here (single-monitor CI), but it
+    # guards against a stale/invalid index crashing a spawn.
+    from dyst.overlay import resolve_screen
+    screens = QApplication.screens()
+    assert screens, "no screens detected"
+    assert resolve_screen("primary") is QApplication.primaryScreen()
+    assert resolve_screen(0) is screens[0]
+    assert resolve_screen(999) is QApplication.primaryScreen()      # out of range
+    assert resolve_screen("ultrawide") is QApplication.primaryScreen()  # bad name
+    assert resolve_screen(True) is QApplication.primaryScreen()     # bool is not an index
+    print("PASS monitor: 'primary'/index resolve, invalid falls back to primary")
+
+    # 1c. selected-monitor origin is applied to window geometry (local rects +
+    # screen offset), so an overlay lands on the right screen.
+    w = OverlayWindow()
+    w._screen_rect = QRect(1920, 0, 1280, 720)  # pretend a right-hand monitor
+    assert w._media_display_rect(100, 100) == (280.0, 0.0, 720.0, 720.0)
+    assert w._window_rect(*w._media_display_rect(100, 100)) == (280, 0, 720, 720)
+    print("PASS monitor: display/window rects are screen-local (offset applied at setGeometry)")
+
     # 2. Image overlay
     win = OverlayWindow()
     assert win.load(img_item.path, "image", image_seconds=0.2, fade_out_seconds=0.1)
