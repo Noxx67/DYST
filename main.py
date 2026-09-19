@@ -609,7 +609,8 @@ def _run_daemon(app, config: dict, use_tray: bool = True) -> None:
                     log.info("tray: RESUMED")
 
         app._tray = Tray(app, on_pause=_on_tray_pause, on_quit=app.quit, parent=app)
-        app._tray.start()
+        started = app._tray.start()
+        log.info("tray: Tray.start() returned %s (started=%s)", started, getattr(app._tray, "started", False))
 
     log.info("daemon: running (odds=1/%s, tick=%ss)",
              config["odds"], config["tick_seconds"])

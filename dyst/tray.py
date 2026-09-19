@@ -53,11 +53,21 @@ def _fallback_image():
 def _load_icon_image():
     """Return a PIL image for the tray icon.
 
-    Prefers the app icon next to the executable/root (icon.ico on a frozen
-    build, icon.webp in a dev checkout) and falls back to a drawn image so the
-    tray never fails just because an asset is missing.
+    Prefers an embedded icon generated at build time so the tray works
+    without icon.ico/icon.webp next to the exe. Falls back to assets
+    beside the executable/root, then to a drawn fallback so the tray
+    never fails just because an asset is missing.
     """
     from PIL import Image
+    import sys
+
+    if getattr(sys, "frozen", False):
+        try:
+            from dyst import _embedded_icon
+            import base64, io
+            return Image.open(io.BytesIO(base64.b64decode(_embedded_icon.ICON_BASE64))).convert("RGBA")
+        except Exception:
+            pass
 
     for name in ("icon.ico", "icon.webp", "icon.png"):
         path = os.path.join(get_base_dir(), name)
@@ -154,6 +164,7 @@ class Tray(QObject):
 
     def start(self) -> bool:
         """Create and run the tray icon. Never raises; False = no tray."""
+        log.info("tray: start() invoked (pystray=%s)", pystray is not None)
         if self._started:
             return True
         if pystray is None:
@@ -170,6 +181,7 @@ class Tray(QObject):
             self._thread = threading.Thread(target=self._icon.run,
                                             name="dyst-tray", daemon=True)
             self._thread.start()
+            log.info("tray: pystray thread started (alive=%s)", self._thread.is_alive())
             self._timer.start()
             self._started = True
             log.info("tray: icon active (right-click for Pause / Quit)")
