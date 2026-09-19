@@ -37,15 +37,19 @@ DONE:
 
 stuff to add later:
 
-    easier configuration page and maybe a gui instead of the raw config.json 
-
     config to play random audiocues along with the image or something
 
-    categorical randomness for numbers (like either 0.2 or 2 with given weights for each of the categories)
+    categorical randomness (like either 0.2 or 2 with given weights for each of the categories)
+
+    play miltiple media at the same time. (when media1 plays media2 plays with it too and more. weight for these should be unified (or just divide the weight by the total bound media))
+
+    shortcuts to force play random media or a certain media.
+
+    if its too slow find an alternative to the way media is drawn ig.
 
     idk what else to add for now. maybe a release build when most of the things work.
 
-    way to test play the media for the .exe executor
+    way to test play the media for the .exe executor (comes with the gui ig)
 
     GUI for the media configuration to test it and stuff.
 
