@@ -33,24 +33,33 @@
   "rotation": 0,
   "weight": 1,
   "play_once": false,
-  "chroma_hue_range": [35, 85],
-  "chroma_saturation_range": [40, 255],
-  "chroma_value_range": [40, 255],
+  "chroma_hue_range": [
+    35,
+    85
+  ],
+  "chroma_saturation_range": [
+    40,
+    255
+  ],
+  "chroma_value_range": [
+    40,
+    255
+  ],
   "_hints": {
-    "image_display_seconds": "How long THIS image/animation stays up (seconds). Overrides the global `image_display_seconds` and takes PRIORITY over the per-file `duration` alias when both are present. Ignored by videos (they run to their end unless `max_duration` caps them).",
-    "duration": "Per-file alias for `image_display_seconds`: how long THIS image/GIF stays up (seconds). Video ignores it. Interacts with `image_display_seconds` (that key wins if both are set), `end_on_audio_end` (the timer is ignored when that is true and a sidecar audio exists) and `max_duration` (the hard cap always wins).",
+    "image_display_seconds": "How long THIS image/animation stays up (seconds). Overrides the global `image_display_seconds` and takes PRIORITY over the per-file `duration` alias when both are present. Ignored by videos (they run to their end unless `max_duration` caps them). Supports randomization: a \"min~max\" string (e.g. \"0.5~1.5\") draws a new value every trigger; both bounds must be valid.",
+    "duration": "Per-file alias for `image_display_seconds`: how long THIS image/GIF stays up (seconds). Video ignores it. Interacts with `image_display_seconds` (that key wins if both are set), `end_on_audio_end` (the timer is ignored when that is true and a sidecar audio exists) and `max_duration` (the hard cap always wins). Supports randomization: a \"min~max\" string (e.g. \"0.5~1.5\") draws a new value every trigger; both bounds must be valid.",
     "end_on_audio_end": "IMAGES/GIFs only: true = THIS image IGNORES its display time and stays up until its sidecar audio ENDS, then fades out. No sidecar audio = no effect (normal timer runs). Overrides the global `end_on_audio_end`. `max_duration` still applies and wins over a long audio track.",
-    "fade_in_seconds": "Fade-in (seconds) for THIS image/GIF before the display clock starts: opacity 0 -> `opacity`. Videos ignore it. Overrides the global `fade_in_seconds`. Lifetime = fade_in + display + fade_out. `speed` divides all three.",
-    "fade_out_seconds": "Fade-out (seconds) for THIS image/GIF. Videos end instantly (no fade). Overrides the global `fade_out_seconds`. The old name `fade_seconds` is still accepted as a deprecated alias. 0 = instant.",
+    "fade_in_seconds": "Fade-in (seconds) for THIS image/GIF before the display clock starts: opacity 0 -> `opacity`. Videos ignore it. Overrides the global `fade_in_seconds`. Lifetime = fade_in + display + fade_out. `speed` divides all three. Supports randomization: a \"min~max\" string (e.g. \"0.5~1.5\") draws a new value every trigger; both bounds must be valid.",
+    "fade_out_seconds": "Fade-out (seconds) for THIS image/GIF. Videos end instantly (no fade). Overrides the global `fade_out_seconds`. The old name `fade_seconds` is still accepted as a deprecated alias. 0 = instant. Supports randomization: a \"min~max\" string (e.g. \"0.5~1.5\") draws a new value every trigger; both bounds must be valid.",
     "max_duration": "Hard cap (seconds) for THIS media AND its audio. When it fires, the visual + audio stop immediately, with NO fade-out, and the overlay closes. Overrides the global `max_duration`; a per-file 0 explicitly DISABLES a global cap for this file. 0 = no cap. Supports ranges: \"1.0~5.0\".",
     "speed": "Playback speed multiplier for THIS media (> 0): scales video frame rate + own audio, GIF animation, sidecar audio, and image display time + fades (all timings / speed). Overrides the global `speed`, but is OVERRIDDEN by `speed_pitch` when that is > 0 (per-file > global). Default 1. Supports ranges: \"1.0~2.0\".",
     "pitch": "Audio pitch multiplier for THIS media (> 0), independent of speed (the audio is re-encoded via ffmpeg; needs ffmpeg when != 1). Overrides the global `pitch`, but is OVERRIDDEN by `speed_pitch` when that is > 0. Default 1. Supports ranges: \"0.5~1.5\".",
     "speed_pitch": "Combined speed+pitch for THIS media (>= 0): when > 0 it sets BOTH `speed` and `pitch` to this value and OVERRIDES the individual `speed`/`pitch` keys (per-file AND global). 0 = off (use speed/pitch separately). Per-file value wins over the global `speed_pitch`. Default 0. Supports ranges: \"1.0~2.0\".",
     "max_playback_height": "Performance cap (px) for THIS file: taller sources are downscaled (aspect kept) BEFORE decode/chroma-key/copy/paint. Videos + GIFs; still images ignore it. Overrides the global `max_playback_height`; 0 = no cap. Changing it rebuilds that file's precache.",
     "max_playback_fps": "Framerate cap for THIS video: frames above it are sampled (duration and audio untouched). GIFs ignore it. Overrides the global `max_playback_fps`; 0 = no cap. Changing it rebuilds that file's precache.",
-    "volume": "Volume multiplier for THIS media (0.0-5.0). MULTIPLIES the global `volume`: final = global * per-file, so 0.5 halves it and 2 doubles it (per-file does NOT replace global). Ignored when the file has no audio. Default 1.",
+    "volume": "Volume multiplier for THIS media (0.0-5.0). MULTIPLIES the global `volume`: final = global * per-file, so 0.5 halves it and 2 doubles it (per-file does NOT replace global). Ignored when the file has no audio. Default 1. Supports randomization: a \"min~max\" string (e.g. \"0.5~1.5\") draws a new value every trigger; both bounds must be valid.",
     "mode": "How THIS media covers the screen: fit (default, whole media visible, aspect kept) | stretch (squish to screen) | cover-height (fit screen width, crop top/bottom) | cover-width (fit screen height, crop left/right) | custom (use the custom-mode keys below). Overrides the global `mode`. The removed 'cover' value falls back to 'fit'.",
-    "opacity": "Overlay transparency for THIS media (0.0-1.0; 1 = fully opaque). Overrides the global `opacity`. Fades compose on top (fade-in 0 -> opacity, fade-out opacity -> 0).",
+    "opacity": "Overlay transparency for THIS media (0.0-1.0; 1 = fully opaque). Overrides the global `opacity`. Fades compose on top (fade-in 0 -> opacity, fade-out opacity -> 0). Supports randomization: a \"min~max\" string (e.g. \"0.5~1.5\") draws a new value every trigger; both bounds must be valid.",
     "position_x": "Custom mode only: horizontal placement for THIS media, clamped to -1..2 (0 = left edge at the screen's left edge, 1 = right edge at the right edge, 0.5 = centered; outside 0..1 peeks/crops off-screen). Overrides the global `position_x`. Ignored unless `mode` is custom. Supports ranges: \"-0.5~1.5\".",
     "position_y": "Custom mode only: vertical placement for THIS media, clamped to -1..2 (0 = top edge at the screen's top edge, 1 = bottom edge at the bottom edge, 0.5 = centered; outside 0..1 peeks/crops off-screen). Overrides the global `position_y`. Ignored unless `mode` is custom. Supports ranges: \"-0.5~1.5\".",
     "scale_x": "Custom mode only: width multiplier for THIS media relative to the aspect-preserving 'fit' size (1 = whole media visible). Overrides the global `scale_x`. IMPORTANT: giving BOTH per-file `scale_x` AND `scale_y` OVERWRITES the per-file `scale`; a lone `scale_x`/`scale_y` overrides only its own axis. Ignored unless `mode` is custom. Supports ranges: \"0.5~1.5\".",

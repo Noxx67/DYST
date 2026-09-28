@@ -39,6 +39,12 @@ from dyst import ffmpeg_util
 log = logging.getLogger("dyst.overlay")
 
 
+def _is_random_kw(v) -> bool:
+    """True for the "random" keyword (case-insensitive) used by the
+    custom-mode mirror keys flip_h / flip_v (matches config._is_bool_or_random)."""
+    return isinstance(v, str) and v.strip().lower() == "random"
+
+
 def resolve_screen(monitor: object):
     """Return the QScreen for a `monitor` config value, or None.
 
@@ -275,7 +281,7 @@ class OverlayWindow(QWidget):
         """
         self._path = path
         self._kind = kind
-        self._image_seconds = max(0.05, image_seconds)
+        self._image_seconds = max(0.05, self._resolve(image_seconds))
         self._fade_out_seconds = max(0.0, self._resolve(fade_out_seconds))
         self._volume = max(0.0, min(5.0, self._resolve(volume)))
         self._mode = mode if mode in ("fit", "cover-height", "cover-width", "stretch", "custom") else "fit"
@@ -417,10 +423,11 @@ class OverlayWindow(QWidget):
         self._scale_x = min(50.0, max(0.01, self._resolve(custom.get("scale_x", 1.0))))
         self._scale_y = min(50.0, max(0.01, self._resolve(custom.get("scale_y", 1.0))))
         # Boolean randomization: "random" keyword picks True/False randomly
+        # (case-insensitive, matching config.py's _is_bool_or_random).
         flip_h = custom.get("flip_h", False)
         flip_v = custom.get("flip_v", False)
-        self._flip_h = random.choice([True, False]) if flip_h == "random" else bool(flip_h)
-        self._flip_v = random.choice([True, False]) if flip_v == "random" else bool(flip_v)
+        self._flip_h = random.choice([True, False]) if _is_random_kw(flip_h) else bool(flip_h)
+        self._flip_v = random.choice([True, False]) if _is_random_kw(flip_v) else bool(flip_v)
         self._rotation = self._resolve(custom.get("rotation", 0.0))
 
     def _resolve(self, val):

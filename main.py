@@ -28,9 +28,31 @@ from dyst.media import _parse_txt_settings, _validate_settings
 log = logging.getLogger("dyst.main")
 
 
+def _is_random_kw(v) -> bool:
+    """True for the "random" keyword (case-insensitive) used by the
+    custom-mode mirror keys flip_h / flip_v."""
+    return isinstance(v, str) and v.strip().lower() == "random"
+
+
+def _resolve_random(val, default):
+    """Resolve a value that may be a (lo, hi) randomization tuple (from a
+    "min~max" config/sidecar value). Returns a random in-range float, the
+    plain float, or *default* when the value is missing/unusable."""
+    if val is None:
+        return default
+    if isinstance(val, (tuple, list)) and len(val) == 2:
+        try:
+            return random.uniform(float(val[0]), float(val[1]))
+        except (TypeError, ValueError):
+            return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 def resolve_speed_pitch(settings: dict, config: dict) -> tuple[float, float]:
     """Resolve the effective (speed, pitch) from per-file settings + config.
-
     `speed_pitch` (per-file > global) sets BOTH speed and pitch to the same
     value and OVERRIDES the individual speed/pitch keys; otherwise per-file
     speed/pitch override global. All default to 1.0.
@@ -297,8 +319,11 @@ def _spawn_overlay(config: dict, item: media.MediaItem, pre: bool = False) -> "O
     # speed/pitch win over global. Defaults 1.0 (no change).
     speed, pitch = resolve_speed_pitch(settings, config)
     # opacity: per-file wins over global; 1.0 = fully opaque (default).
-    opacity = float(settings.get("opacity", config.get("opacity", 1.0)))
-    volume = config["volume"] * float(settings.get("volume", 1.0))
+    # Both may be a (lo, hi) randomization tuple ("min~max" in the JSON).
+    opacity = _resolve_random(settings.get("opacity", config.get("opacity", 1.0)), 1.0)
+    # volume: global gain times the per-file multiplier; each may randomize.
+    volume = _resolve_random(config.get("volume"), 0.8) * \
+        _resolve_random(settings.get("volume"), 1.0)
     if item.kind == "image":
         image_seconds = settings.get("image_display_seconds",
                                      settings.get("duration",

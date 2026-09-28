@@ -60,6 +60,7 @@ DEFAULTS: Dict[str, Any] = {
     "position_y": 0.5,   # normalized Y: 0 = top edge at screen top, 1 = bottom edge at screen bottom, -1..2 allowed (peek/crop)
     "scale_x": 1.0,      # width multiplier relative to the "fit" size (1 = whole media visible, aspect kept)
     "scale_y": 1.0,      # height multiplier relative to the "fit" size
+    "scale": 1.0,       # custom-mode uniform scale multiplier (sets BOTH scale_x and scale_y)
     "flip_h": False,     # mirror horizontally
     "flip_v": False,     # mirror vertically
     "rotation": 0.0,     # degrees (around the placed rect's center)
@@ -248,6 +249,16 @@ def _is_monitor(v: Any) -> bool:
     return False
 
 
+def _is_bool_or_random(v: Any) -> bool:
+    """A boolean that also accepts the literal "random" (case-insensitive),
+    which picks True/False per spawn. Used ONLY for flip_h/flip_v — the
+    custom-mode mirror keys, which already support "random" per-file (see
+    OverlayWindow._apply_custom). Other booleans stay strictly true/false."""
+    if isinstance(v, bool):
+        return True
+    return isinstance(v, str) and v.strip().lower() == "random"
+
+
 def _is_range(v: Any, lo: int, hi: int) -> bool:
     return (
         isinstance(v, (list, tuple))
@@ -255,6 +266,57 @@ def _is_range(v: Any, lo: int, hi: int) -> bool:
         and all(isinstance(x, int) and not isinstance(x, bool) for x in v)
         and lo <= v[0] <= v[1] <= hi
     )
+
+
+# ---- numeric randomization (min~max) ------------------------------------
+# A global numeric key may be given as a "min~max" STRING (or a 2-item
+# [min, max] list) to randomize it per spawn. Only the keys listed here
+# accept ranges — the same set the per-file sidecars allow (see the
+# randomization pass in dyst/media.py). Booleans, enums and system keys
+# (chroma, play_once, end_on_audio_end, mode, monitor, autostart, ...) never
+# randomize.
+RANDOM_RANGE_KEYS = (
+    "position_x", "position_y", "scale_x", "scale_y", "scale",
+    "rotation", "speed", "pitch", "speed_pitch",
+    "image_display_seconds", "fade_in_seconds", "fade_out_seconds",
+    "opacity", "max_duration", "volume",
+)
+_RANDOM_RANGE_KEYS = frozenset(RANDOM_RANGE_KEYS)
+RANDOM_RANGE_DELIMITER = "~"
+
+
+def _parse_range(val: Any) -> "tuple[float, float] | None":
+    """Parse a "min~max" string (or [min, max] list) into an ordered
+    (lo, hi) float tuple. Returns None when it is not a well-formed range."""
+    parts = None
+    if isinstance(val, str) and RANDOM_RANGE_DELIMITER in val:
+        parts = val.split(RANDOM_RANGE_DELIMITER)
+    elif isinstance(val, (list, tuple)) and len(val) == 2 \
+            and all(not isinstance(x, bool) for x in val):
+        parts = list(val)
+    if parts is None or len(parts) != 2:
+        return None
+    try:
+        lo, hi = float(parts[0]), float(parts[1])
+    except (TypeError, ValueError):
+        return None
+    return (hi, lo) if lo > hi else (lo, hi)
+
+
+def _range_ok(val: Any, validator) -> bool:
+    """A "min~max" range is acceptable when BOTH bounds pass the key's
+    validator, so a range cannot smuggle out-of-bounds numbers past it."""
+    rng = _parse_range(val)
+    return rng is not None and validator(rng[0]) and validator(rng[1])
+
+
+def _is_range_or(validator):
+    """Wrap a numeric validator so it also accepts a valid "min~max" range."""
+    def wrapped(v: Any) -> bool:
+        if _range_ok(v, validator):
+            return True
+        return validator(v)
+    return wrapped
 
 
 # (validator, default) per top-level key.
@@ -265,27 +327,28 @@ _TOP_LEVEL_RULES = {
     "play_once": (_is_bool, DEFAULTS["play_once"]),
     "reroll_in_same_tick": (_is_bool, DEFAULTS["reroll_in_same_tick"]),
     "media_folder": (lambda v: isinstance(v, str) and v != "", DEFAULTS["media_folder"]),
-    "image_display_seconds": (_is_positive, DEFAULTS["image_display_seconds"]),
+    "image_display_seconds": (_is_range_or(_is_positive), DEFAULTS["image_display_seconds"]),
     "end_on_audio_end": (_is_bool, DEFAULTS["end_on_audio_end"]),
-    "fade_out_seconds": (_is_nonnegative, DEFAULTS["fade_out_seconds"]),
-    "fade_in_seconds": (_is_nonnegative, DEFAULTS["fade_in_seconds"]),
-    "opacity": (_is_volume, DEFAULTS["opacity"]),
-    "max_duration": (_is_nonnegative, DEFAULTS["max_duration"]),
-    "speed": (_is_positive, DEFAULTS["speed"]),
-    "pitch": (_is_positive, DEFAULTS["pitch"]),
-    "speed_pitch": (_is_nonnegative, DEFAULTS["speed_pitch"]),
+    "fade_out_seconds": (_is_range_or(_is_nonnegative), DEFAULTS["fade_out_seconds"]),
+    "fade_in_seconds": (_is_range_or(_is_nonnegative), DEFAULTS["fade_in_seconds"]),
+    "opacity": (_is_range_or(_is_volume), DEFAULTS["opacity"]),
+    "max_duration": (_is_range_or(_is_nonnegative), DEFAULTS["max_duration"]),
+    "speed": (_is_range_or(_is_positive), DEFAULTS["speed"]),
+    "pitch": (_is_range_or(_is_positive), DEFAULTS["pitch"]),
+    "speed_pitch": (_is_range_or(_is_nonnegative), DEFAULTS["speed_pitch"]),
     "max_playback_height": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["max_playback_height"]),
     "max_playback_fps": (_is_nonnegative, DEFAULTS["max_playback_fps"]),
     "monitor": (_is_monitor, DEFAULTS["monitor"]),
     "mode": (lambda v: isinstance(v, str) and v in ("fit", "cover-height", "cover-width", "stretch", "custom"), DEFAULTS["mode"]),
-    "position_x": (lambda v: _is_num(v) and -1.0 <= v <= 2.0, DEFAULTS["position_x"]),
-    "position_y": (lambda v: _is_num(v) and -1.0 <= v <= 2.0, DEFAULTS["position_y"]),
-    "scale_x": (_is_positive, DEFAULTS["scale_x"]),
-    "scale_y": (_is_positive, DEFAULTS["scale_y"]),
-    "flip_h": (_is_bool, DEFAULTS["flip_h"]),
-    "flip_v": (_is_bool, DEFAULTS["flip_v"]),
-    "rotation": (_is_num, DEFAULTS["rotation"]),
-    "volume": (_is_gain, DEFAULTS["volume"]),
+    "position_x": (_is_range_or(lambda v: _is_num(v) and -1.0 <= v <= 2.0), DEFAULTS["position_x"]),
+    "position_y": (_is_range_or(lambda v: _is_num(v) and -1.0 <= v <= 2.0), DEFAULTS["position_y"]),
+    "scale_x": (_is_range_or(_is_positive), DEFAULTS["scale_x"]),
+    "scale_y": (_is_range_or(_is_positive), DEFAULTS["scale_y"]),
+    "scale": (_is_range_or(_is_positive), DEFAULTS["scale"]),
+    "flip_h": (_is_bool_or_random, DEFAULTS["flip_h"]),
+    "flip_v": (_is_bool_or_random, DEFAULTS["flip_v"]),
+    "rotation": (_is_range_or(_is_num), DEFAULTS["rotation"]),
+    "volume": (_is_range_or(_is_gain), DEFAULTS["volume"]),
     "download_max_height": (lambda v: _is_num(v) and v > 0 and float(v).is_integer(), DEFAULTS["download_max_height"]),
     "rescan_seconds": (lambda v: _is_num(v) and v >= 0 and float(v).is_integer(), DEFAULTS["rescan_seconds"]),
     "autostart": (_is_bool, DEFAULTS["autostart"]),
@@ -437,6 +500,16 @@ def load_config(path: str) -> Dict[str, Any]:
             log.warning("config: failed to read %s (%s) — using defaults", path, exc)
     else:
         log.info("config: no file at %s — using defaults", path)
+
+    # Randomization: convert accepted "min~max" range values into ordered
+    # (lo, hi) tuples ONCE, at load time, so every consumer (main.py timers,
+    # OverlayWindow._resolve) sees the same shape regardless of whether the
+    # value came from config.json or a per-file sidecar.
+    for key in RANDOM_RANGE_KEYS:
+        if isinstance(cfg.get(key), (str, list, tuple)):
+            rng = _parse_range(cfg[key])
+            if rng is not None:
+                cfg[key] = rng
 
     # Always converts relative media_folder paths regardless of how config loaded
     if not os.path.isabs(cfg["media_folder"]):

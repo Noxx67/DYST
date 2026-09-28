@@ -1,3 +1,0 @@
-D	AGENTS.md
-D	PLAN.md
-D	PROGRESS.md
