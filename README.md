@@ -1,27 +1,38 @@
 # DYST (did you see that? 👀)
 
-A Windows background app — at random intervals it plays an image or video on top of whatever you're doing, then disappears.
-No window, no taskbar icon, no focus steal; it overlays directly on the screen, with a
-hidden tray icon as the only visible handle on it (Pause / Quit).
+Turn your Windows desktop into a live shitpost over any app.
 
 ---
 
 ## Quick start
 
+**1. need python3 then run the following commands:**
+
 ```bat
 :: 1. one-time setup
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
+```
 
-:: 2. drop media into the folders
-::    media\images\  -> png, gif, jpg, webp (transparent ones work best)
-::    media\videos\  -> mp4, webm, avi, mov, mkv
+**2. drop media into the folders**
+```
+media\images\  -> png, jpg, webp (transparent ones work best)
+media\gifs\    -> gif
+media\videos\  -> mp4, webm, avi, mov, mkv
+```
 
-:: 3. try it
-.venv\Scripts\python main.py --test          :: play one random file then exit
-.venv\Scripts\python main.py --play path\to\file.mp4   :: play a specific file
-.venv\Scripts\python main.py --daemon        :: run the chance loop (odds, tick)
-.venv\Scripts\python main.py --roll          :: print one simulated roll
+**3. run the program**
+```
+.venv\Scripts\python main.py --test           play one random file then exit
+.venv\Scripts\python main.py --play path\to\file.mp4    play a specific file
+.venv\Scripts\python main.py --daemon         run the chance loop (odds, tick)
+.venv\Scripts\python main.py --roll           print one simulated roll
+```
+
+**4. or just use the launchers**
+```
+run.bat                  launch with a console window
+run-in-background.bat    launch hidden (no console, tray only)
 ```
 
 ---
@@ -32,11 +43,13 @@ python -m venv .venv
 app_root/
 ├── main.py                 entry point
 ├── config.json             global settings (see below)
+├── config_template.json    per-file sidecar reference (copy next to media)
 ├── video-urls.txt          list of URLs for the downloader
-├── dyst/                   app code
+├── dyst/                   app code lol
 ├── media/
-│   ├── images/             images you add (png/gif/jpg/webp)
-│   └── videos/             videos you add (mp4/webm/avi/mov/mkv)
+│   ├── images/             images you add (png/jpg/webp)
+│   ├── videos/             videos you add (mp4/webm/avi/mov/mkv)
+│   └── gifs/               gifs you add
 └── scripts/                dev + helper scripts
 ```
 
@@ -57,18 +70,21 @@ documenting every global key (and how it interacts with the per-file keys).
 The **per-file** sidecar reference/template is `config_template.json` (copy it
 next to a media file and rename it to match).
 
-Edit this file by hand (a settings window may come later). All keys are
+Edit this file by hand (a GUI might come later if i wanna bother). All keys are
 optional — anything missing falls back to the default. Bad values are ignored
-with a warning, never crash the app.
+with a warning.
 
 ```jsonc
 {
   "tick_seconds": 1.0,          // seconds between chance rolls (must be > 0)
   "odds": 1000,                 // 1-in-N chance per tick (e.g. 1000 = 1/1000)
   "max_concurrent": 3,          // max overlays playing at once; 0 = unlimited
+  "play_once": false,           // true = never start the same file twice while it is already playing
   "reroll_in_same_tick": true,  // on success, re-roll immediately (bursts)
 
   "media_folder": "media",      // folder with images/ and videos/ subfolders
+  "rescan_seconds": 0,          // daemon re-scans the media folder every N seconds; 0 = scan once at startup
+  "download_max_height": 1080,  // max video height (px) for the downloader only
   "image_display_seconds": 1.0, // how long a still image stays up
   "end_on_audio_end": false,   // images: disappear when the sidecar audio ends (ignores image_display_seconds; max_duration still applies)
   "fade_out_seconds": 0.2,      // fade-out duration at end of playback (renamed from fade_seconds)
@@ -76,39 +92,72 @@ with a warning, never crash the app.
   "max_duration": 0,            // hard cap (seconds) on any overlay + its audio; 0 = no cap
   "speed": 1.0,                 // playback speed multiplier (>0): videos/gifs/audio/image display + fades
   "pitch": 1.0,                 // audio pitch multiplier (>0): sidecar + audio-bearing media
-  "speed_pitch": 0,             // combined speed+pitch: >0 sets BOTH and overrides speed/pitch; 0 = off
+  "speed_pitch": 0,             // combined speed+pitch: >0 sets BOTH and overrides speed/pitch; 0 = off, useful when randomizing both values
   "max_playback_height": 480,  // cap decode/key/paint height (px): taller videos/GIFs are downscaled keeping aspect (stable playback for high-res clips); 0 = native
   "max_playback_fps": 30,      // cap effective playback fps (videos; frame-sampled, audio untouched); 0 = native
 
+  "volume": 0.8,               // master volume/gain 0.0-5.0 (1.0 = 100%; >1 boosts; per-file volume multiplies it)
+
   "monitor": "primary",         // which screen: "primary" | "all" (random monitor per overlay) | 0-based index
   "mode": "fit",                // how media covers the screen: fit (default) | stretch | cover-height | cover-width | custom
+  "opacity": 1.0,               // overlay transparency 0.0-1.0 (1 = fully opaque; fades compose on top)
 
   // Only used when "mode": "custom" (per-file sidecar values win):
   "position_x": 0.5,           // X position -1..2: 0 = left edge at screen left, 1 = right edge at screen right, 0.5 = centered; -1 = fully off-screen left, 2 = fully off-screen right (lets media peek in / get cropped)
   "position_y": 0.5,           // Y position -1..2: 0 = top edge at screen top, 1 = bottom edge at screen bottom, 0.5 = centered; same off-screen range
-  "scale_x": 1.0,              // width multiplier relative to the "fit" size (1 = whole media visible, aspect kept)
-  "scale_y": 1.0,              // height multiplier relative to the "fit" size
-  "flip_h": false,             // mirror horizontally
-  "flip_v": false,             // mirror vertically
+  "scale": 1.0,                // media size relative to the "fit" size (1 = whole media visible, aspect kept)
+  "scale_x": 1.0,              // width multiplier relative to the "fit" size, overwrites "scale" when value is set
+  "scale_y": 1.0,              // height multiplier relative to the "fit" size, overwrites "scale" when value is set
+  "flip_h": false,             // flip horizontally
+  "flip_v": false,             // flip vertically
   "rotation": 0,               // rotation in degrees (around the media's center)
 
   // Green/blue-screen removal. 'custom' takes the hue/sat/val ranges
   // from the keys below (ignored for any other preset).
   "chroma_key": "green",      // "off" | "green" (default) | "blue" |
                                 // "weak green" | "strong green" | "weak blue"
-                                // | "strong blue" | "custom"
+                                // | "strong blue" | "black" | "white" | "custom"
   "chroma_hue_range": [35, 85],        // hue 0..179 (green ~60, blue ~120)
   "chroma_saturation_range": [40, 255], // saturation 0..255
   "chroma_value_range": [40, 255],      // value 0..255
   // ^^^^ the three range keys are IGNORED unless chroma_key == "custom"
-  "autostart": false,           // start with Windows (Phase 6, coming)
-  "kill_hotkey": "ctrl+shift+alt+k",  // global dead man's switch ("" = disabled)
+  "autostart": false,           // start with Windows (silent boot into the tray)
+  "show_console": false,        // true = launch with a visible log terminal; false = hidden background
+  "kill_hotkey": "ctrl+shift+alt+k",  // global dead man's switch ("" = disabled) I REALLY RECOMMEND YOU DONT TURN THIS OFF
   "kill_notify": true,          // show a Windows notification when the kill switch fires
   "debug": false                // verbose logging to app.log
 }
 ```
 
-**Green-screen presets** — instead of hunting for HSV numbers, set the
+**Randomization** — most numeric keys can be given a **range** instead of a
+fixed number: use a `"min~max"` string and a fresh value is drawn **every
+spawn**. This works globally in `config.json` and per-file in a sidecar, for
+`image_display_seconds` · `fade_in_seconds` · `fade_out_seconds` · `max_duration`
+· `speed` · `pitch` · `speed_pitch` · `opacity` · `volume` · `position_x` ·
+`position_y` · `scale` · `scale_x` · `scale_y` · `rotation`. Both bounds must be
+valid for that key (e.g. `opacity` must stay within 0–1), otherwise the value is
+rejected with a warning and the default is kept.
+
+```jsonc
+"opacity": "0.7~1.0",        // new opacity each spawn
+"image_display_seconds": "1~3",
+"mode": "custom",
+"scale": "0.5~1.5"
+```
+
+`flip_h` / `flip_v` are the **only** booleans that randomize — give them the
+string `"random"` and each spawn flips a coin:
+
+```jsonc
+"flip_h": "random",
+"flip_v": "random"
+```
+
+All other booleans and enums (`chroma`, `play_once`, `end_on_audio_end`,
+`mode`, `monitor`, `autostart`…) are **strict** — `"random"` is rejected with a
+warning.
+
+**Green-screen presets** — instead of hunting for HSV numbers, you can set the
 `chroma_key` value to a named preset (or use the old dict form for expert
 tuning). `despill` (edge de-greening, default ON) and the hue window are
 auto-applied; the hue window is also auto-re-centred on each video's actual
@@ -122,6 +171,11 @@ screen colour at cache-build time.
 | `"blue"` | 100–130 | 40–255 | 40–255 | standard blue screens |
 | `"weak blue"` | 90–145 | 20–255 | 30–255 | faint/uneven blue — wider catch |
 | `"strong blue"` | 105–130 | 60–255 | 50–255 | vivid uniform blue — less risk of punching holes |
+| `"black"` | 0–179 *(ignored)* | 0–255 | 0–35 | a **dark/black backdrop** instead of a colour screen — keys dark pixels (luma mode) |
+| `"white"` | 0–179 *(ignored)* | 0–30 | 220–255 | a **white/lightbox backdrop** — keys bright, desaturated pixels (luma mode) |
+
+Setting `"chroma_key": "off"` disables keying everywhere (same as the old
+`enabled: false` dict form).
 
 A preset fills in the three ranges for you; any `hue_range` / `saturation_range` / `value_range` you also set explicitly **still override** it per-key. If you want something else entirely, leave `preset` empty (`""`) and set the ranges by hand. Case doesn't matter (`"GREEN"` works).
 
@@ -171,7 +225,7 @@ volume=0.8
 | `max_playback_fps` | any number >= 0 (fps, default `0` = no cap) | Per-file override of the global `max_playback_fps`: cap the effective playback framerate (videos only — OpenCV/chroma/AV1 paths). Sources above it are frame-sampled (every Nth frame presented); duration and audio are untouched. Changing it rebuilds that file's precache. |
 | `max_duration` | any number >= 0 (seconds, default `0`) | Hard cap for this file. When the timer runs out, the video/image/gif **and** its sidecar audio stop **immediately** and the overlay closes **instantly — no fade-out**. `0` = no cap (play naturally). Setting it smaller than `image_display_seconds` truncates the image display; smaller than a video's length cuts the video off early. Per-file wins over the global `max_duration` — use `0` per-file to disable a global cap for one file. **Use string format for ranges:** `"1.0~5.0"`. |
 | `chroma` | `true` / `false` (default: follow the global `chroma_key`) | Per-file override of the green/blue-screen removal. `false` = **skip keying** even when the global `chroma_key` is on (use it for assets that already have real alpha, or for videos that aren't green-screen at all — they'll also get faster, normal playback). `true` = force keying on this file. |
-| `chroma_key` | PRESET: `"green"` (default) | `"blue"` | `"weak green"` | `"strong green"` | `"weak blue"` | `"strong blue"` | `"custom"` | Per-file chroma-key preset (each file its own key, independent of global). `"custom"` ignores the presets and uses the per-file range keys below instead. Setting a preset turns keying ON for that file; `chroma: false` always wins. |
+| `chroma_key` | PRESET: `"green"` (default) | `"blue"` | `"weak green"` | `"strong green"` | `"weak blue"` | `"strong blue"` | `"black"` | `"white"` | `"custom"` | Per-file chroma-key preset (each file its own key, independent of global). `"custom"` ignores the presets and uses the per-file range keys below instead. Setting a preset turns keying ON for that file; `chroma: false` always wins. |
 | `chroma_hue_range` | `[lo, hi]` (default `[35, 85]`) | | | Hue range 0..179 (OpenCV scale; green ~60, blue ~120). **Only used when `chroma_key` is `"custom"` — ignored for every other preset.** |
 | `chroma_saturation_range` | `[lo, hi]` (default `[40, 255]`) | | | Saturation range 0..255. **Only used when `chroma_key` is `"custom"`.** |
 | `chroma_value_range` | `[lo, hi]` (default `[40, 255]`) | | | Value range 0..255. **Only used when `chroma_key` is `"custom"`.** |
@@ -181,13 +235,14 @@ volume=0.8
 when attached to a video they are silently ignored (videos play to end and use
 the global `fade_out_seconds` for their fade-out).
 
-Anything invalid is dropped with a logged warning — it never breaks the app.
+Anything invalid is dropped with a logged warning.
 
 > **Tip:** the demo file `media/images/test_scare.json` shows an example
 > (cover-height, 3s, volume 0.7). Delete or edit it to see the effect.
 
 ### 3. `video-urls.txt` (downloader input)
 
+Bonus file because i was lazy. needs `yt-dlp` and `ffmpeg` on your system to work.
 One URL per line; blank lines and lines starting with `#` are ignored. Then run:
 
 ```bat
@@ -195,9 +250,7 @@ One URL per line; blank lines and lines starting with `#` are ignored. Then run:
 ```
 
 Downloads each video (best quality, with audio, muxed into one mp4 — **no
-audio extraction**) into `media/videos\` as `Title [id].mp4`. Requires
-`yt-dlp` and `ffmpeg`; the script finds ffmpeg even if your terminal was
-opened before it was installed.
+audio extraction**) into `media/videos/` as `Title [id].mp4`. 
 
 ---
 
@@ -315,6 +368,26 @@ not responding at all.
 
 ---
 
+## Start with Windows (autostart)
+
+Set `"autostart": true` in `config.json` (or leave it `false`) and DYST keeps
+the Windows `Run` key in sync with it on **every launch** — `config.json` is the
+single source of truth, the registry just mirrors it:
+
+- **`true`** — DYST (re)registers itself under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` on every launch, so a
+  moved or updated executable re-points itself automatically. Windows then boots
+  it silently straight into the tray.
+- **`false`** — the entry is cleared. If the PC booted the app through a stale
+  `Run` entry, DYST **removes the key and exits immediately**; a normal manual
+  launch just clears any stale key and keeps running.
+
+Boot launches carry an internal `--autostart` flag (baked into the `Run` value),
+which is how the app tells a boot launch apart from a manual one. There is no
+tray checkbox for this in v1 — edit `config.json` by hand.
+
+---
+
 ## CLI reference
 
 | Flag | What it does |
@@ -392,17 +465,8 @@ Result: `dist/DYST/DYST.exe` (~260 MB with dependencies).
 
 ---
 
-## Recent Changes
+## Future Plans that will probably not be done
 
-- **Fixed image closing prematurely**: Updated `_close_if_ready` in `dyst/overlay.py` to require that the visual media has finished displaying (`_visual_done`), the fade-out animation has completed (`_fade_done`), and the audio has finished (`_audio_done`) before closing the overlay. This prevents the overlay from closing early when the side‑car audio is shorter than the configured display time.
-
-- **Fixed image centering**: Changed the `mode` in `media/images/woolly-mammoth.json` from `"cover"` to `"fit"`. The `"fit"` mode preserves the aspect ratio and centers the image within the window (adding letter‑boxing if needed), ensuring the image appears in the middle.
-
-## What's coming (see PROGRESS.md for details)
-
-- **Phase 2** — media validation (skip corrupt files), sidecar audio files ✅ done
-- **Phase 3** — chroma key (green-screen removal) ✅ done (despill on by default, hole-filling, auto hue calibration, one-time cached audio)
-- **Phase 4** — overlay polish (GIF/APNG animation ✅, monitor selection ✅ incl. `"all"` random screen)
-- **Phase 5** — overlay manager (global max concurrency) + full audio ✅ done
-- **Phase 6** — tray icon (Pause / Quit ✅; Test Trigger / autostart toggle still to come), autostart ✅ done
-- **Phase 7** — packaging + this doc becoming the real user README
+- GUI for file configuration because the current .json configuration kinda sucks
+- A BIG MAYBE for a server to upload and download custom user made configurations and media packs
+- linux support altho the window managers in linux will probably make this impossible

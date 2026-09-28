@@ -27,7 +27,7 @@ all of them will be explained in detailed in the hints section of config.json (g
 and if youre confused just check the files yourself and do what im already doing lol
 
 IMPORTANT: now in the case the media get stuck or becomes too overwhelming you have 2 ways to kill the program
->shortcut: ctrl+shift+k
+>shortcut: ctrl+shift+alt+k
 >tray icon in the bottom right that shows a menu where you can pause the media or stop the program
 
 you also have app.log generated which shows what the app did so far idk if its important to 99% of the users if there will be any
