@@ -32,6 +32,9 @@ CONFIG_SRC = ROOT / "config.json"
 CONFIG_TEMPLATE = ROOT / "config_template.json"
 MEDIA_SRC = ROOT / "media"
 COPY_ITEMS = ("config.json", "config_template.json", "media")
+
+# Staged under a DIFFERENT name in the build output: source -> deployed name.
+COPY_RENAMES = {"README-dist.txt": "README.txt"}
 ICON_SRC = ROOT / "icon.webp"
 ICON_DST = ROOT / "icon.ico"
 
@@ -107,12 +110,13 @@ def _copytree_filtered(src: Path, dst: Path) -> None:
 
 def _copy_runtime_files() -> int:
     """Refresh config.json and media/ inside the build output (fresh copy)."""
-    for name in COPY_ITEMS:
+    for name in COPY_ITEMS + tuple(COPY_RENAMES):
         src = ROOT / name
+        out_name = COPY_RENAMES.get(name, name)
 
         # Remove the previous copy so stale files don't linger (source of truth
         # is always the project root).
-        dst = DIST_DIR / name
+        dst = DIST_DIR / out_name
         try:
             if dst.exists():
                 if dst.is_dir():
@@ -132,7 +136,7 @@ def _copy_runtime_files() -> int:
                     shutil.copytree(src, dst)
             else:
                 shutil.copy2(src, dst)
-            print(f"[copy] {name} -> {DIST_DIR / name}")
+            print(f"[copy] {name} -> {DIST_DIR / out_name}")
         except OSError as exc:
             print(f"[copy] FAILED copying {name}: {exc}", file=sys.stderr)
             return 1

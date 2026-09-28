@@ -1,7 +1,7 @@
-welcome to 0.0.2v we making it out of the streets with this one
+on that v1.0 release im making it out the trenches with this one 
 
 put the media that you want to show up in the media folder and in their respective video/image/gif folder
-some media should already be provided by me and hold examples of the configuration you can do
+some media should already be provided by yours truly and hold examples of the many configurations you can do
 
 you can add some audio with the media to play along just make sure the name format is the same as the image/gif/video
 
@@ -43,5 +43,3 @@ for more details refer to example.json which has "hints" and most of the paramet
 you would have app.log generated which shows what the app did so far idk if its important to 99% of the users if there will be any
 
 right click the tray icon for 2 buttons: Pause/Resume (stops anything new from showing and clears the screen) and Quit (closes the app completely)
-
-(need to add weights for chance of appearance and an individual scale parameter to not stretch media)
