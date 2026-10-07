@@ -2,6 +2,8 @@
 
 Turn your Windows desktop into a live shitpost over any app.
 
+Discord 
+
 ---
 
 ## Quick start
@@ -225,11 +227,11 @@ volume=0.8
 | `max_playback_fps` | any number >= 0 (fps, default `0` = no cap) | Per-file override of the global `max_playback_fps`: cap the effective playback framerate (videos only — OpenCV/chroma/AV1 paths). Sources above it are frame-sampled (every Nth frame presented); duration and audio are untouched. Changing it rebuilds that file's precache. |
 | `max_duration` | any number >= 0 (seconds, default `0`) | Hard cap for this file. When the timer runs out, the video/image/gif **and** its sidecar audio stop **immediately** and the overlay closes **instantly — no fade-out**. `0` = no cap (play naturally). Setting it smaller than `image_display_seconds` truncates the image display; smaller than a video's length cuts the video off early. Per-file wins over the global `max_duration` — use `0` per-file to disable a global cap for one file. **Use string format for ranges:** `"1.0~5.0"`. |
 | `chroma` | `true` / `false` (default: follow the global `chroma_key`) | Per-file override of the green/blue-screen removal. `false` = **skip keying** even when the global `chroma_key` is on (use it for assets that already have real alpha, or for videos that aren't green-screen at all — they'll also get faster, normal playback). `true` = force keying on this file. |
-| `chroma_key` | PRESET: `"green"` (default) | `"blue"` | `"weak green"` | `"strong green"` | `"weak blue"` | `"strong blue"` | `"black"` | `"white"` | `"custom"` | Per-file chroma-key preset (each file its own key, independent of global). `"custom"` ignores the presets and uses the per-file range keys below instead. Setting a preset turns keying ON for that file; `chroma: false` always wins. |
-| `chroma_hue_range` | `[lo, hi]` (default `[35, 85]`) | | | Hue range 0..179 (OpenCV scale; green ~60, blue ~120). **Only used when `chroma_key` is `"custom"` — ignored for every other preset.** |
-| `chroma_saturation_range` | `[lo, hi]` (default `[40, 255]`) | | | Saturation range 0..255. **Only used when `chroma_key` is `"custom"`.** |
-| `chroma_value_range` | `[lo, hi]` (default `[40, 255]`) | | | Value range 0..255. **Only used when `chroma_key` is `"custom"`.** |
-| `play_once` | `true` / `false` (default `false`) | | | true = this media won’t be picked again while any copy of it is already playing. false = repeats are allowed. Per-file value overrides the global `play_once`. |
+| `chroma_key` | PRESET: `"green"` (default) · `"blue"` · `"weak green"` · `"strong green"` · `"weak blue"` · `"strong blue"` · `"black"` · `"white"` · `"custom"` | Per-file chroma-key preset (each file its own key, independent of global). `"custom"` ignores the presets and uses the per-file range keys below instead. Setting a preset turns keying ON for that file; `chroma: false` always wins. |
+| `chroma_hue_range` | `[lo, hi]` (default `[35, 85]`) | Hue range 0..179 (OpenCV scale; green ~60, blue ~120). **Only used when `chroma_key` is `"custom"` — ignored for every other preset.** |
+| `chroma_saturation_range` | `[lo, hi]` (default `[40, 255]`) | Saturation range 0..255. **Only used when `chroma_key` is `"custom"`.** |
+| `chroma_value_range` | `[lo, hi]` (default `[40, 255]`) | Value range 0..255. **Only used when `chroma_key` is `"custom"`.** |
+| `play_once` | `true` / `false` (default `false`) | true = this media won’t be picked again while any copy of it is already playing. false = repeats are allowed. Per-file value overrides the global `play_once`. |
 
 `duration`, `image_display_seconds`, and `fade_out_seconds` are **image-only** —
 when attached to a video they are silently ignored (videos play to end and use

@@ -24,11 +24,14 @@ from __future__ import annotations
 import logging
 import os
 import random
+import queue
+import threading
+from typing import Optional
 
 import cv2
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Property, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import Property, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal, Slot, QMetaObject
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtWidgets import QApplication, QWidget
@@ -102,6 +105,10 @@ class OverlayWindow(QWidget):
     finished = Signal()
     FRAME_MS = 33  # ≈30 fps video playback
 
+    # Bound the decoder thread's queue so memory doesn't balloon for fast
+    # decodes; the GUI drains at _decode_budget frames/tic.
+    _DECODE_QUEUE_MAX = 8
+
     def __init__(self, parent=None, monitor: object = "primary"):
         super().__init__(parent)
         self._path: str | None = None
@@ -154,6 +161,16 @@ class OverlayWindow(QWidget):
         self._video_timer = QTimer(self)
         self._video_timer.setInterval(self.FRAME_MS)
         self._video_timer.timeout.connect(self._next_frame)
+
+        # Off-GUI-thread video decode + chroma key pipeline.
+        # The decode worker runs cv2 reads (slow, blocking) on a dedicated
+        # thread and pushes finished QImage frames to _frame_queue; the GUI
+        # timer drains at most _decode_budget frames per tick so the event
+        # loop is never blocked by slow decode/key.
+        self._frame_queue: queue.Queue = queue.Queue()  # maxsize set in _load_video_cv
+        self._decoder_thread: Optional[threading.Thread] = None
+        self._decoder_stop = threading.Event()
+        self._decoder_lock = threading.Lock()
 
         # Paint opacity (0..1): the ACTUAL rendering opacity. Animated by the
         # fade animations instead of windowOpacity (see the class docstring).
@@ -615,6 +632,7 @@ class OverlayWindow(QWidget):
                 self._audio_player.play()  # sidecar
         else:  # "video" / "video-av1"
             if self._cap is not None:
+                self._ensure_decoder()
                 if self._audio_player is not None and self._kind != "video":
                     # AUDIO-FIRST START: QMediaPlayer has startup latency
                     # (media warm-up + Windows audio session setup). If the
@@ -645,6 +663,7 @@ class OverlayWindow(QWidget):
             self._video_clock_fallback = None
         if self._closing or self._cap is None or self._video_timer.isActive():
             return
+        self._ensure_decoder()
         if (self._audio_player is not None and not self._audio_started
                 and self._audio_player.playbackState()
                     != QMediaPlayer.PlaybackState.PlayingState):
@@ -697,6 +716,7 @@ class OverlayWindow(QWidget):
         else:
             self._decode_budget = 1
         self._frame_index = 0  # frame 0 already consumed above
+        self._decoder_presented = 1 if self._cached_masks is not None else 0
         if self._fps_step == 1:
             # Frame 0 is presented immediately: _presented is still 0, so
             # _paint_frame indexes mask 0, then we mark it as shown.
@@ -944,6 +964,7 @@ class OverlayWindow(QWidget):
         any audio (sidecar / extracted / embedded) immediately and close the
         overlay with NO fade-out (user request: instant disappear)."""
         self._video_timer.stop()
+        self._stop_decoder()
         self._fade_in.stop()
         if self._player is not None:
             self._player.stop()
@@ -1043,7 +1064,7 @@ class OverlayWindow(QWidget):
         h, w = rgb.shape[:2]
         return QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
 
-    def _paint_frame(self, frame) -> QImage:
+    def _paint_frame(self, frame, mask_idx=None) -> QImage:
         """BGR frame -> QImage for display, applying chroma key when set.
 
         With a pre-processing cache (video-chroma-cached) the cached per-frame
@@ -1057,11 +1078,11 @@ class OverlayWindow(QWidget):
             frame = cv2.resize(frame, self._pb_dst, interpolation=cv2.INTER_AREA)
         if self._cached_masks is not None:
             out = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
-            # _presented = index of the frame being presented right now
-            # (0-based), so the mask that matches this frame is _presented
-            # itself — both precache and playback present every Nth source
-            # frame in the same order.
-            idx = min(max(0, self._presented), len(self._cached_masks) - 1)
+            # mask_idx = index of the frame being presented right now
+            # (0-based); the worker passes its own counter so masks stay
+            # aligned even though GUI drain runs on another thread.
+            mi = mask_idx if mask_idx is not None else self._presented
+            idx = min(max(0, mi), len(self._cached_masks) - 1)
             out[:, :, 3] = self._cached_masks[idx]
             if self._chroma_params is not None and self._chroma_params.get("despill"):
                 chroma_mod._despill(out, self._chroma_params)
@@ -1082,68 +1103,118 @@ class OverlayWindow(QWidget):
         self._frame_index += 1
         return True, frame
 
-    def _next_frame(self) -> None:
-        if self._cap is None:
+    def _ensure_decoder(self) -> None:
+        """Start the background decode worker (once per overlay)."""
+        if self._decoder_thread is not None and self._decoder_thread.is_alive():
             return
-        step = self._fps_step
+        self._decoder_stop.clear()
+        self._frame_queue = queue.Queue(maxsize=self._DECODE_QUEUE_MAX)
+        self._decoder_presented = 0  # worker-side presented counter (mask index)
+        t = threading.Thread(target=self._decoder_worker, name="dyst-decoder", daemon=True)
+        self._decoder_thread = t
+        t.start()
+
+    def _stop_decoder(self) -> None:
+        """Signal the worker to stop; called on teardown paths."""
+        self._decoder_stop.set()
+        # Unblock a worker waiting on a full queue.
+        try:
+            while True:
+                self._frame_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    def _decoder_worker(self) -> None:
+        """Background thread: blocking cv2 read + chroma key + QImage
+        convert. Pushes finished frames to _frame_queue; the GUI timer only
+        blits. Never touches widgets directly."""
+        try:
+            step = max(1, int(self._fps_step))
+            while not self._decoder_stop.is_set():
+                frame = None
+                with self._decoder_lock:
+                    cap = self._cap
+                    if cap is None:
+                        return
+                    for _ in range(step):
+                        ok, f = cap.read()
+                        if not ok:
+                            QMetaObject.invokeMethod(self, "_on_decoder_eos", Qt.QueuedConnection)
+                            return
+                        frame = f
+                if frame is None:
+                    return
+                try:
+                    img = self._paint_frame(frame, mask_idx=self._decoder_presented)
+                except Exception:
+                    continue
+                self._decoder_presented += 1
+                # Bounded queue with backpressure: block when GUI lags so
+                # decode stays ~presentation rate (no drops, no speed-up).
+                # Stop event unblocks via _stop_decoder draining the queue.
+                while not self._decoder_stop.is_set():
+                    try:
+                        self._frame_queue.put(img, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
+        except Exception:
+            import traceback; traceback.print_exc()
+
+    @Slot()
+    def _on_decoder_eos(self) -> None:
+        """Worker hit end-of-stream: stop timer, finish visual (GUI thread)."""
+        if self._closing:
+            return
+        self._video_timer.stop()
+        self._on_visual_finished()
+
+    def _next_frame(self) -> None:
+        """GUI tick: present frames paced to the audio clock (or the timer
+        rate when no audio). Decode/key runs on the worker; this only blits,
+        so a slow frame can't block the event loop or stall audio."""
+        if self._closing:
+            return
+        if self._cap is None and self._frame_queue.empty():
+            return
+        budget = max(1, int(self._decode_budget))
         if (self._kind in ("video-av1", "video-chroma", "video-chroma-cached")
                 and self._audio_player is not None
                 and self._audio_player.playbackState()
-                == QMediaPlayer.PlaybackState.PlayingState):
-            # Audio-synced pacing WITHOUT per-frame seeks (those re-decode
-            # from the nearest keyframe — very slow for AV1). Decode
-            # sequentially and use the audio clock only to decide whether to
-            # advance: never decode more than _decode_budget frames per tick
-            # (the old code chased the audio position with bursts up to 30
-            # frames — freezing the GUI then jumping = visible stutter).
-            # EVERY decoded frame is painted; the newest one is what the
-            # screen shows. With the fps cap (step > 1) `step` source frames
-            # are decoded per presented frame and only every Nth is painted,
-            # so the presented rate stays at the capped fps while the audio
-            # clock (untouched) keeps the duration exact.
+                    == QMediaPlayer.PlaybackState.PlayingState):
+            # Audio-synced pacing: present only up to where the audio clock
+            # says we should be (never more than budget/tick, so catch-up
+            # is smooth, not a jump). Worker stays ahead via the queue.
+            step = max(1, int(self._fps_step))
             target = int(self._audio_player.position() * (self._fps / step) / 1000.0)
+            target = min(target, self._presented + budget)
             painted = False
-            if step == 1:
-                target = min(target, self._frame_index + self._decode_budget)
-                while self._frame_index < target:
-                    ok, frame = self._decode_one()
-                    if not ok:
-                        return
-                    self._current = self._paint_frame(frame)
-                    self._presented += 1
-                    painted = True
-            else:
-                target = min(target, self._presented + self._decode_budget)
-                while self._presented < target:
-                    frame = None
-                    for _ in range(step):
-                        ok, frame = self._decode_one()
-                        if not ok:
-                            return
-                    self._current = self._paint_frame(frame)
-                    self._presented += 1
-                    painted = True
+            while self._presented < target:
+                try:
+                    img = self._frame_queue.get_nowait()
+                except queue.Empty:
+                    break  # worker behind: wait, don't freeze on a burst
+                self._current = img
+                self._presented += 1
+                painted = True
             if painted:
                 self._prepare_current()
                 self.update()
             return
-        # Non-audio-synced kinds (plain "video"): the timer already ticks at
-        # the effective fps; decode `step` source frames per tick and show
-        # the last one so the presentation rate matches the duration.
-        ok, frame = self._decode_one()
-        if not ok:
-            return
-        for _ in range(step - 1):
-            ok, frame = self._decode_one()
-            if not ok:
-                return
-        self._current = self._paint_frame(frame)
+        # No audio clock: timer already ticks at effective fps x speed, so
+        # exactly one queued frame per tick keeps duration exact.
+        try:
+            img = self._frame_queue.get_nowait()
+        except queue.Empty:
+            return  # worker behind: skip tick, timer retries
+        self._current = img
         self._presented += 1
         self._prepare_current()
         self.update()
 
     def _start_fade(self) -> None:
         self._video_timer.stop()
+        self._stop_decoder()
         self._fade_in.stop()  # fade-in must never overlap the fade-out
         if self._player is not None:
             self._player.stop()
@@ -1178,8 +1249,16 @@ class OverlayWindow(QWidget):
             return
         self._closing = True
         self._video_timer.stop()
+        self._stop_decoder()
         self._fade_in.stop()
-        if self._cap is not None:
+        with self._decoder_lock:
+            cap, self._cap = self._cap, None
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        if False:
             self._cap.release()
             self._cap = None
         if self._player is not None:

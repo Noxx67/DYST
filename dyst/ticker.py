@@ -72,9 +72,7 @@ class Ticker:
     def roll(self) -> bool:
         """True if this roll succeeds: random < 1/odds."""
         odds = max(1, int(self.cfg.get("odds", 1000)))
-        roll_num = random.random()
-        print(f"rolled: {roll_num}")
-        return roll_num < 1.0 / odds
+        return random.random() < 1.0 / odds
 
     def tick(self) -> None:
         """One timer tick: roll once, then burst on success up to the cap."""
