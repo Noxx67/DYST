@@ -1,8 +1,16 @@
 # DYST (did you see that? 👀)
 
+<p align="center">
+  <img src="icon.webp" alt="DYST icon" width="220" />
+</p>
+
 Turn your Windows desktop into a live shitpost over any app.
 
-Discord 
+**Links:**
+
+- 💬 [Discord](https://discord.gg/cVRSBH4HGb) — join the server (support + bug reports)
+- 📸 [Instagram](https://www.instagram.com/nox.dev.stuff/) — nox.dev.stuff
+- ☕ [Ko-fi](https://ko-fi.com/noxidiot) — support the project
 
 ---
 

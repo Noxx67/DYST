@@ -37,4 +37,18 @@ gui configuration for json files
 some kind of server to upload and download user made media packs and configs (as if lmao)
 linux support (idfk)
 
-any bug reports or suggestions id recommend going on the repo
+any bug reports or suggestions id recommend going on the repo (github repo link below)
+
+---
+
+SUPPORT THE PROJECT & GET HELP
+
+if you hit a problem, need help, or just want to hang out, join the discord server - thats where support happens:
+>discord: https://discord.gg/cVRSBH4HGb
+
+show some love:
+>github repo (star it, report bugs, contribute): https://github.com/Noxx67/DYST
+>ko-fi (donate / support the dev): https://ko-fi.com/noxidiot
+>instagram (follow for dev stuff): https://www.instagram.com/nox.dev.stuff/
+
+thanks for using DYST <3
