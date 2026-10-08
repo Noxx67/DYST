@@ -8,9 +8,9 @@ Turn your Windows desktop into a live shitpost over any app.
 
 **Links:**
 
-- [Discord](https://discord.gg/cVRSBH4HGb) — join the server (support + bug reports)
-- [Instagram](https://www.instagram.com/nox.dev.stuff/) — nox.dev.stuff
-- [Ko-fi](https://ko-fi.com/noxidiot) — support the project
+- [Discord](https://discord.gg/cVRSBH4HGb) — join the server (help + bug reports)
+- [Instagram](https://www.instagram.com/nox.dev.stuff/) — acc where i spam random stuff i do (occasionally)
+- [Ko-fi](https://ko-fi.com/noxidiot) — support the stupid stuff i do
 
 ---
 
