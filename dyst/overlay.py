@@ -103,11 +103,18 @@ class OverlayWindow(QWidget):
     """
 
     finished = Signal()
+    # Cross-thread completions (emitted from worker threads -> queued to GUI):
+    # ffmpeg audio prep (extract and/or pitch bake) and GIF frame decode.
+    _audio_baked = Signal(str, str)                # (playable_path, temp_path or "")
+    _gif_loaded = Signal(object, object, object)   # (raw_frames, display_frames, durations)
+
     FRAME_MS = 33  # ≈30 fps video playback
 
     # Bound the decoder thread's queue so memory doesn't balloon for fast
-    # decodes; the GUI drains at _decode_budget frames/tic.
-    _DECODE_QUEUE_MAX = 8
+    # decodes; the GUI drains at _decode_budget frames/tic. Frames in the
+    # queue are WINDOW-SIZE display images (pre-cropped/scaled by the
+    # worker), so keep the bound tight.
+    _DECODE_QUEUE_MAX = 4
 
     def __init__(self, parent=None, monitor: object = "primary"):
         super().__init__(parent)
@@ -180,6 +187,30 @@ class OverlayWindow(QWidget):
         # ONCE per frame, not on every repaint). paintEvent blits this 1:1.
         self._render_cache: QImage | None = None
         self._preparing = False
+        # Layout snapshot (GUI thread, _update_layout) + latest raw source
+        # frame. _build_display() consumes _layout from the decoder/render
+        # WORKER threads so per-frame crop/scale never touches the GUI
+        # thread; _last_raw is only read on resize for recovery.
+        self._layout: dict | None = None
+        self._last_raw: QImage | None = None
+        # Async audio prep: True while ffmpeg extraction/bake is in flight
+        # (the video clock waits for it: audio-first start).
+        self._audio_extracting = False
+        self._started = False         # start() has run
+        # Async GIF decode: frames arrive via _gif_loaded; the image clock
+        # is deferred (_gif_start_pending) until they do.
+        self._gif_loading = False
+        self._gif_start_pending = False
+        self._qt_deferred = False        # video-qt: wait for pitch-baked audio
+        self._qt_audio_late = False      # video-qt: seek late audio to video pos
+        self._gif_disps: list = []    # per-frame display caches (built off-GUI)
+        self._render_thread: threading.Thread | None = None
+        self._produced = 0   # frames finished by workers (diagnostics)
+        # qt path: raw QVideoSink frames -> render thread (crop/scale off-GUI).
+        self._render_in: queue.Queue = queue.Queue(4)
+
+        self._audio_baked.connect(self._on_audio_baked)
+        self._gif_loaded.connect(self._on_gif_loaded)
 
         self._fade = QPropertyAnimation(self, b"paint_opacity", self)
         self._fade.finished.connect(self._fade_finished)
@@ -241,8 +272,24 @@ class OverlayWindow(QWidget):
         super().resizeEvent(event)
         # Our geometry is authoritative; if it changed, the cached render is
         # stale — rebuild it (guarded against re-entrancy in _prepare_current).
-        if not self._preparing:
-            self._prepare_current()
+        if self._preparing:
+            return
+        src = self._current
+        if src is None or src.isNull():
+            src = self._last_raw   # video overlays: latest raw frame
+        if src is None or src.isNull():
+            return
+        self._preparing = True
+        try:
+            # Geometry changed behind our back: invalidate + recompute.
+            if self._layout is not None:
+                self._layout["stale"] = True
+            self._update_layout(src.width(), src.height())
+            built = self._build_display(src, self._layout)
+            if built is not None:
+                self._render_cache = built
+        finally:
+            self._preparing = False
 
     # -- public -----------------------------------------------------------
 
@@ -357,54 +404,30 @@ class OverlayWindow(QWidget):
                         break
 
         if kind == "image":
-            # Animated GIF support via manual frame extraction.
+            # Animated GIF support. Decode + chroma + per-frame display
+            # caches run on a WORKER thread: a big GIF used to freeze the
+            # GUI for hundreds of ms per spawn during a same-tick burst.
+            # The layout comes from the image header only (no decode here),
+            # and the display clock waits for _gif_loaded.
             if path.lower().endswith(".gif"):
                 try:
                     with Image.open(path) as im:
-                        if getattr(im, "is_animated", False):
-                            frames = []
-                            durations = []
-
-                            for i in range(im.n_frames):
-                                im.seek(i)
-                                frame = im.convert("RGBA")
-                                if self._max_pb_h and frame.height > self._max_pb_h:
-                                    # Height cap: downscale BEFORE keying so
-                                    # the mask/work cost scales with the cap.
-                                    h2 = self._max_pb_h
-                                    w2 = max(1, int(round(frame.width * h2 / frame.height)))
-                                    frame = frame.resize((w2, h2), Image.BILINEAR)
-                                if self._chroma_params is not None:
-                                    frame = chroma_mod.chroma_key_image(frame, self._chroma_params)
-                                arr = np.array(frame)
-                                h, w = arr.shape[:2]
-
-                                # Create a clean QImage copy so memory isn't reclaimed by Python
-                                qi = QImage(arr.data, w, h, arr.strides[0], QImage.Format_RGBA8888).copy()
-                                frames.append(qi)
-
-                                # Extract frame duration (default to 100ms if 0 or missing)
-                                dur = im.info.get("duration", 100)
-                                durations.append(dur if dur > 0 else 100)
-
-                            self._gif_frames = frames
-                            self._gif_durations = durations
-                            self._gif_frame_index = 0
-                            self._current = frames[0] if frames else None
-                            self._gif_duration_ms = sum(durations)
-                            self._prepare_current()
-
-                            # Initialize single-shot timer
-                            self._gif_timer = QTimer(self)
-                            self._gif_timer.setSingleShot(True)
-                            self._gif_timer.timeout.connect(self._advance_gif_frame)
-
-                            # Start initial delay timer for Frame 0 -> Frame 1
-                            self._gif_timer.start(max(1, int(self._gif_durations[0] / self._speed)))
-
-                            if self._sidecar:
-                                self._create_audio_player(self._sidecar)
-                            return True
+                        animated = bool(getattr(im, "is_animated", False))
+                        n_frames = int(getattr(im, "n_frames", 1) or 1)
+                        w0, h0 = im.size
+                    if animated and n_frames > 1:
+                        lw, lh = w0, h0
+                        if self._max_pb_h and lh > self._max_pb_h:
+                            lh = self._max_pb_h
+                            lw = max(1, int(round(w0 * lh / h0)))
+                        self._update_layout(lw, lh)
+                        self._gif_loading = True
+                        threading.Thread(target=self._gif_load_worker,
+                                         args=(path, n_frames), daemon=True,
+                                         name="dyst-gif-load").start()
+                        if self._sidecar:
+                            self._create_audio_player(self._sidecar)
+                        return True
                 except Exception as exc:
                     log.warning("overlay: cannot load gif %s (%s)", path, exc)
 
@@ -520,11 +543,106 @@ class OverlayWindow(QWidget):
         return (int(round(x0)), int(round(y0)),
                 max(1, int(round(x1 - x0))), max(1, int(round(y1 - y0))))
 
+    def _update_layout(self, iw: int, ih: int) -> None:
+        """(Re)compute the per-frame layout snapshot: window geometry on the
+        screen + the source->window mapping (crop + target size + custom
+        transform). MUST run on the GUI thread (setGeometry); the snapshot is
+        then read-only, so workers can build display frames from it safely.
+        Any frame whose source size differs from iw/ih is treated as an
+        oversize source (image inside a video) and uses the fit branch."""
+        layout = self._layout
+        if (layout is not None and layout["iw"] == iw and layout["ih"] == ih
+                and not layout.get("stale")):
+            return
+        dx, dy, dw, dh = self._media_display_rect(iw, ih)
+        if dw <= 0 or dh <= 0:
+            self._layout = None
+            return
+        wx, wy, ww, wh = self._window_rect(dx, dy, dw, dh)
+        ox, oy = self._screen_rect.x(), self._screen_rect.y()
+        try:
+            cur = self.geometry()
+            if (cur.x(), cur.y(), cur.width(), cur.height()) != (wx + ox, wy + oy, ww, wh):
+                self.setGeometry(wx + ox, wy + oy, ww, wh)
+        except RuntimeError:
+            return  # C++ side already deleted
+        custom = (self._mode == "custom"
+                  and (self._rotation or self._flip_h or self._flip_v))
+        inv_x = iw / dw if dw else 1.0
+        inv_y = ih / dh if dh else 1.0
+        if custom:
+            sx0 = sy0 = 0
+            sx1, sy1 = iw, ih
+        else:
+            sx0 = int(min(iw - 1, max(0, round((wx - dx) * inv_x))))
+            sy0 = int(min(ih - 1, max(0, round((wy - dy) * inv_y))))
+            sx1 = int(min(iw, max(sx0 + 1, round((wx + ww - dx) * inv_x))))
+            sy1 = int(min(ih, max(sy0 + 1, round((wy + wh - dy) * inv_y))))
+        self._layout = {"iw": iw, "ih": ih, "stale": False,
+                        "wx": wx, "wy": wy, "ww": ww, "wh": wh,
+                        "dx": dx, "dy": dy, "dw": dw, "dh": dh,
+                        "sx0": sx0, "sy0": sy0, "sx1": sx1, "sy1": sy1,
+                        "custom": custom, "flip_h": self._flip_h,
+                        "flip_v": self._flip_v, "rotation": self._rotation,
+                        "pos_x": self._position_x, "pos_y": self._position_y}
+
+    @staticmethod
+    def _build_display(src: QImage, layout: dict | None = None) -> QImage | None:
+        """Crop + scale (and custom flip/rotate) *src* into the exact window
+        size — ONE transform per frame. Read-only, so any thread may call it.
+        Returns None for a dead source/layout."""
+        if layout is None or src is None or src.isNull():
+            return None
+        iw, ih = src.width(), src.height()
+        if iw != layout["iw"] or ih != layout["ih"]:
+            return None  # source size changed: layout is stale, skip frame
+        ww, wh = layout["ww"], layout["wh"]
+        if layout["custom"]:
+            cache = QImage(ww, wh, QImage.Format_ARGB32_Premultiplied)
+            cache.fill(Qt.transparent)
+            p = QPainter(cache)
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.translate((layout["dx"] + layout["dw"] * 0.5) - layout["wx"],
+                        (layout["dy"] + layout["dh"] * 0.5) - layout["wy"])
+            if layout["flip_h"] or layout["flip_v"]:
+                p.scale(-1.0 if layout["flip_h"] else 1.0,
+                        -1.0 if layout["flip_v"] else 1.0)
+            if layout["rotation"]:
+                p.rotate(layout["rotation"])
+            p.drawImage(QRectF(-layout["dw"] * 0.5, -layout["dh"] * 0.5,
+                               layout["dw"], layout["dh"]), src)
+            p.end()
+            return cache
+        crop = src.copy(layout["sx0"], layout["sy0"],
+                        layout["sx1"] - layout["sx0"],
+                        layout["sy1"] - layout["sy0"])
+        if crop.width() != ww or crop.height() != wh:
+            crop = crop.scaled(ww, wh, Qt.IgnoreAspectRatio,
+                               Qt.SmoothTransformation)
+        return crop
+
+    def _present(self, src: QImage, keep_raw: bool = False) -> None:
+        """Set the current frame + build its display cache + repaint.
+        GUI-thread fast path when the layout is current (per-frame cost is a
+        single crop+scale); falls back through _prepare_current when the
+        window geometry changed."""
+        if src is None or src.isNull():
+            return
+        if keep_raw:
+            self._last_raw = src
+        self._current = src
+        self._update_layout(src.width(), src.height())
+        built = self._build_display(src, self._layout)
+        if built is None:
+            self._prepare_current()   # stale layout / size mismatch
+            return
+        self._render_cache = built
+        self.update()
+
     def _prepare_current(self) -> None:
-        """Build self._render_cache: the current frame scaled/cropped to the
-        window size, with custom-mode flip/rotation applied. Called only when
-        the frame or geometry changes, so paintEvent can blit it 1:1 (the old
-        code re-scaled the full image on every repaint)."""
+        """GUI-thread rebuild of _render_cache from the current frame (geometry
+        may have just changed). Workers build display frames themselves via
+        _build_display, so this only runs on resize/geometry changes."""
         if self._preparing:
             return
         img = self._current
@@ -533,48 +651,11 @@ class OverlayWindow(QWidget):
             return
         self._preparing = True
         try:
-            iw, ih = img.width(), img.height()
-            dx, dy, dw, dh = self._media_display_rect(iw, ih)
-            if dw <= 0 or dh <= 0:
+            self._update_layout(img.width(), img.height())
+            if self._layout is None:
                 self._render_cache = None
                 return
-            wx, wy, ww, wh = self._window_rect(dx, dy, dw, dh)
-            # _window_rect() is in screen-local coords; add the selected
-            # monitor's origin so the window lands on the right screen.
-            ox, oy = self._screen_rect.x(), self._screen_rect.y()
-            cur = self.geometry()
-            if (cur.x(), cur.y(), cur.width(), cur.height()) != (wx + ox, wy + oy, ww, wh):
-                self.setGeometry(wx + ox, wy + oy, ww, wh)
-
-            if self._mode == "custom" and (self._rotation or self._flip_h or self._flip_v):
-                cache = QImage(ww, wh, QImage.Format_ARGB32_Premultiplied)
-                cache.fill(Qt.transparent)
-                p = QPainter(cache)
-                p.setRenderHint(QPainter.SmoothPixmapTransform)
-                p.translate((dx + dw * 0.5) - wx, (dy + dh * 0.5) - wy)
-                if self._flip_h or self._flip_v:
-                    p.scale(-1.0 if self._flip_h else 1.0,
-                            -1.0 if self._flip_v else 1.0)
-                if self._rotation:
-                    p.rotate(self._rotation)
-                p.drawImage(QRectF(-dw * 0.5, -dh * 0.5, dw, dh), img)
-                p.end()
-                self._render_cache = cache
-                return
-
-            # Non-rotated: crop the visible slice of the source, then scale it
-            # to the window size (one scale per frame, not per repaint).
-            inv_x = iw / dw
-            inv_y = ih / dh
-            sx0 = int(min(iw - 1, max(0, round((wx - dx) * inv_x))))
-            sy0 = int(min(ih - 1, max(0, round((wy - dy) * inv_y))))
-            sx1 = int(min(iw, max(sx0 + 1, round((wx + ww - dx) * inv_x))))
-            sy1 = int(min(ih, max(sy0 + 1, round((wy + wh - dy) * inv_y))))
-            crop = img.copy(sx0, sy0, sx1 - sx0, sy1 - sy0)
-            if crop.width() != ww or crop.height() != wh:
-                crop = crop.scaled(ww, wh, Qt.IgnoreAspectRatio,
-                                   Qt.SmoothTransformation)
-            self._render_cache = crop
+            self._render_cache = self._build_display(img, self._layout)
         finally:
             self._preparing = False
 
@@ -582,58 +663,39 @@ class OverlayWindow(QWidget):
         """Begin playback: image timer, Qt video, or OpenCV frame loop."""
         # Base opacity for the whole overlay (fades compose on top of it).
         self.paint_opacity = self._opacity
+        self._started = True
         self._start_max_timer()
         if self._kind == "image":
             if self._audio_player is not None:
                 self._audio_player.play()  # sidecar audio over the image
-                        
-            if self._gif_frames:
-                # DO NOT call self._gif_timer.start() here without args; load() already started frame 0.
-                # GIFs: play through once, then begin the visual fade-out while
-                # any sidecar audio keeps playing (single overlay for max_concurrent).
-                gif_duration = getattr(self, "_gif_duration_ms", len(self._gif_frames) * 50)
-                # Speed scales BOTH the image hold time and the GIF animation
-                # (image display duration and fades time-scale with 1/speed).
-                self._display_ms = max(int(self._image_seconds * 1000 / self._speed),
-                                       int(gif_duration / self._speed))
-            else:
-                self._display_ms = int(self._image_seconds * 1000 / self._speed)
-            # Cancellable member timer (not QTimer.singleShot) so max_duration
-            # can stop it when it force-closes the overlay.
-            self._image_end_timer = QTimer(self)
-            self._image_end_timer.setSingleShot(True)
-            self._image_end_timer.timeout.connect(self._visual_end)
-            # end_on_audio_end: IGNORE image_display_seconds entirely — the
-            # visual lasts until the sidecar audio ENDS (max_duration still
-            # applies via _start_max_timer above). No sidecar audio = the
-            # flag is a no-op and the normal display timer runs.
-            wait_for_audio_end = (self._end_on_audio_end
-                                  and self._audio_player is not None)
-            if self._fade_in_seconds > 0:
-                # Fade in FIRST (opacity 0 -> base opacity); the display clock
-                # starts when it completes, so lifetime = fade_in + display +
-                # fade_out.
-                self.paint_opacity = 0.0
-                self._fade_in.setDuration(int(self._fade_in_seconds * 1000 / self._speed))
-                self._fade_in.setStartValue(0.0)
-                self._fade_in.setEndValue(self._opacity)
-                self._fade_in.start()
-                if wait_for_audio_end:
-                    self._arm_audio_end_watchdog()
-            elif wait_for_audio_end:
-                self._arm_audio_end_watchdog()
-            else:
-                self._image_end_timer.start(self._display_ms)
-                
+            if self._gif_loading:
+                # GIF frames are decoding on a worker thread; the display
+                # clock starts in _on_gif_loaded (audio already playing).
+                self._gif_start_pending = True
+                return
+            self._begin_image_clock()
+
         elif self._kind == "video-qt":
-            if self._player is not None:
+            # Render thread (crop/scale off-GUI) + a fast drain timer that
+            # presents whatever it produced.
+            self._ensure_decoder()
+            self._video_timer.setInterval(16)
+            self._video_timer.start()
+            if self._audio_extracting:
+                # pitch-baked audio still extracting: start the video with
+                # the audio in _on_audio_baked (synced), with a 5s fallback.
+                self._qt_deferred = True
+                QTimer.singleShot(5000, self._qt_deferred_start)
+            elif self._player is not None:
                 self._player.play()
             if self._audio_player is not None:
                 self._audio_player.play()  # sidecar
         else:  # "video" / "video-av1"
             if self._cap is not None:
                 self._ensure_decoder()
-                if self._audio_player is not None and self._kind != "video":
+                if (self._kind != "video"
+                        and (self._audio_player is not None
+                             or self._audio_extracting)):
                     # AUDIO-FIRST START: QMediaPlayer has startup latency
                     # (media warm-up + Windows audio session setup). If the
                     # frame timer ran freely meanwhile, the video would run
@@ -642,7 +704,10 @@ class OverlayWindow(QWidget):
                     # lead the audio. The video clock therefore starts only
                     # once the audio ACTUALLY reaches PlayingState (its clock
                     # is authoritative), with a short fallback in case the
-                    # audio never starts.
+                    # audio never starts (or ffmpeg extraction still runs).
+                    # A late-joining audio track is seek-aligned to the
+                    # already-presented frames in _next_frame instead of
+                    # freezing the video.
                     self._video_clock_pending = True
                     self._video_clock_fallback = QTimer(self)
                     self._video_clock_fallback.setSingleShot(True)
@@ -652,6 +717,57 @@ class OverlayWindow(QWidget):
                     self._video_timer.start()
             if self._audio_player is not None:
                 self._audio_player.play()
+
+    def _qt_deferred_start(self) -> None:
+        """Fallback for a stuck/failed pitch-bake: start the video anyway."""
+        if self._closing or not self._qt_deferred:
+            return
+        self._qt_deferred = False
+        if self._player is not None and self._player.playbackState() \
+                != QMediaPlayer.PlaybackState.PlayingState:
+            self._player.play()
+
+    def _begin_image_clock(self) -> None:
+        """Image/GIF display clock (the non-visual part of start()'s image
+        branch), started immediately or deferred until async GIF frames land."""
+        if self._gif_frames:
+            # Frame-0 timer starts in _on_gif_loaded; here we only arm the
+            # display clock (deferred while _gif_loading).
+            # GIFs: play through once, then begin the visual fade-out while
+            # any sidecar audio keeps playing (single overlay for max_concurrent).
+            gif_duration = getattr(self, "_gif_duration_ms", len(self._gif_frames) * 50)
+            # Speed scales BOTH the image hold time and the GIF animation
+            # (image display duration and fades time-scale with 1/speed).
+            self._display_ms = max(int(self._image_seconds * 1000 / self._speed),
+                                   int(gif_duration / self._speed))
+        else:
+            self._display_ms = int(self._image_seconds * 1000 / self._speed)
+        # Cancellable member timer (not QTimer.singleShot) so max_duration
+        # can stop it when it force-closes the overlay.
+        self._image_end_timer = QTimer(self)
+        self._image_end_timer.setSingleShot(True)
+        self._image_end_timer.timeout.connect(self._visual_end)
+        # end_on_audio_end: IGNORE image_display_seconds entirely — the
+        # visual lasts until the sidecar audio ENDS (max_duration still
+        # applies via _start_max_timer above). No sidecar audio = the
+        # flag is a no-op and the normal display timer runs.
+        wait_for_audio_end = (self._end_on_audio_end
+                              and self._audio_player is not None)
+        if self._fade_in_seconds > 0:
+            # Fade in FIRST (opacity 0 -> base opacity); the display clock
+            # starts when it completes, so lifetime = fade_in + display +
+            # fade_out.
+            self.paint_opacity = 0.0
+            self._fade_in.setDuration(int(self._fade_in_seconds * 1000 / self._speed))
+            self._fade_in.setStartValue(0.0)
+            self._fade_in.setEndValue(self._opacity)
+            self._fade_in.start()
+            if wait_for_audio_end:
+                self._arm_audio_end_watchdog()
+        elif wait_for_audio_end:
+            self._arm_audio_end_watchdog()
+        else:
+            self._image_end_timer.start(self._display_ms)
 
     def _start_video_clock(self) -> None:
         """Start the OpenCV frame timer (deferred until the audio clock runs).
@@ -674,15 +790,13 @@ class OverlayWindow(QWidget):
     # -- internals --------------------------------------------------------
 
     def _load_video_cv(self, path: str) -> bool:
-        """OpenCV video path (frames only, no audio)."""
+        """OpenCV video path (frames only, no audio). Opens the stream and
+        reads dimensions — NO frame decode on the GUI thread (the old
+        sync frame-0 read + paint stalled every spawn for ~50-100 ms).
+        The first frame arrives through the normal decode queue."""
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
             log.error("overlay: cannot open video %s", path)
-            return False
-        ok, frame = cap.read()
-        if not ok:
-            log.error("overlay: no frames in video %s", path)
-            cap.release()
             return False
         self._cap = cap
         # Play at the video's real frame rate (fallback ~30fps), minus the
@@ -696,11 +810,18 @@ class OverlayWindow(QWidget):
         if self._fps > 1:
             # Speed multiplier: interval = base / speed (faster = shorter).
             self._video_timer.setInterval(max(1, int(1000.0 / (eff_fps * self._speed))))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         # Height cap: remember the downscale target; _paint_frame applies it.
-        if self._max_pb_h and frame.shape[0] > self._max_pb_h:
+        if w > 0 and h > 0 and self._max_pb_h and h > self._max_pb_h:
             h2 = self._max_pb_h
-            w2 = max(2, int(round(frame.shape[1] * h2 / frame.shape[0])))
+            w2 = max(2, int(round(w * h2 / h)))
             self._pb_dst = (w2, h2)
+        # Size the window NOW from stream properties so the very first frame
+        # presents without a geometry change mid-playback.
+        if w > 0 and h > 0:
+            pw, ph = self._pb_dst or (w, h)
+            self._update_layout(pw, ph)
         # Per-tick decode budget for the audio-synced kinds. QMediaPlayer's
         # position() updates coarsely (tens of ms), so chasing it frame-for-
         # frame used to decode BURSTS (up to 30 frames!) per tick — freezing
@@ -715,27 +836,46 @@ class OverlayWindow(QWidget):
             self._decode_budget = 2
         else:
             self._decode_budget = 1
-        self._frame_index = 0  # frame 0 already consumed above
-        self._decoder_presented = 1 if self._cached_masks is not None else 0
-        if self._fps_step == 1:
-            # Frame 0 is presented immediately: _presented is still 0, so
-            # _paint_frame indexes mask 0, then we mark it as shown.
-            self._current = self._paint_frame(frame)
-            self._presented = 1
-        else:
-            # Frame 0 is NOT a sampled frame (sampling presents every Nth
-            # source frame), so nothing is painted until the first one —
-            # the window stays transparent for <step/fps (~1 frame).
-            self._current = None
-            self._presented = 0
-        self._prepare_current()
+        self._frame_index = 0
+        self._decoder_presented = 0
+        # Nothing painted until the worker delivers frame 0 (fits the fps
+        # sampling rule too: with step > 1 the first sampled frame is not 0).
+        self._current = None
+        self._presented = 0
         return True
 
     def _create_audio_player(self, path: str) -> None:
         """Dedicated audio player (sidecar or extracted track). Speed/pitch
         are baked into a temp file when either != 1.0 (QtMultimedia has no
-        pitch API), so the player runs at rate 1.0."""
-        src = self._prepare_audio_file(path)
+        pitch API) — that ffmpeg bake runs on a WORKER thread and the player
+        is attached by _on_audio_baked, so spawning never freezes the GUI."""
+        if self._speed != 1.0 or self._pitch != 1.0:
+            self._audio_extracting = True
+            threading.Thread(target=self._bake_audio_async, args=(path,),
+                             daemon=True, name="dyst-audio-bake").start()
+            return
+        self._create_audio_player_now(path)
+
+    def _emit_audio_baked(self, playable: str, temp: str) -> None:
+        """Worker-thread-safe emit: the overlay may already be destroyed
+        (close raced the ffmpeg run) — then the temp file leaks at worst,
+        never crash."""
+        try:
+            self._audio_baked.emit(playable, temp)
+        except RuntimeError:
+            pass
+
+    def _bake_audio_async(self, path: str) -> None:
+        """Worker: bake speed/pitch into a temp copy. Falls back to the
+        original file when ffmpeg is unavailable / fails."""
+        baked = ffmpeg_util.pitch_shift(path, self._pitch, self._speed)
+        if baked is None:
+            self._emit_audio_baked(path, "")
+        else:
+            self._emit_audio_baked(baked, baked)
+
+    def _create_audio_player_now(self, src: str) -> None:
+        """GUI thread: build the QMediaPlayer for an already-playable file."""
         audio_out = QAudioOutput(self)
         audio_out.setVolume(self._volume)
         self._audio_output = audio_out
@@ -746,41 +886,28 @@ class OverlayWindow(QWidget):
         player.playbackStateChanged.connect(self._on_audio_playback_state)
         self._audio_player = player
 
-    def _prepare_audio_file(self, path: str) -> str:
-        """Return a playable version of *path* honouring speed/pitch.
-        If both are 1.0 (default) returns the original. Otherwise bakes the
-        changes into a temp file via ffmpeg and tracks it for cleanup.
-        Falls back to the original if ffmpeg is unavailable / fails."""
-        if self._speed == 1.0 and self._pitch == 1.0:
-            return path
-        baked = ffmpeg_util.pitch_shift(path, self._pitch, self._speed)
-        if baked is None:
-            return path
-        self._temp_files.append(baked)
-        return baked
-
     def _load_video_av1(self, path: str, embedded_audio: str = "") -> bool:
         """OpenCV-decoded video path (AV1 / chroma): frames via OpenCV.
         Audio precedence: sidecar wins; else the one-time CACHED extraction
         (from precache, when present — no ffmpeg run at spawn time); else
-        extract the embedded track to a temp file played via Qt.
+        extract the embedded track ASYNCHRONOUSLY on a worker thread (a
+        sync ffmpeg run blocked the GUI for ~1s per AV1 spawn) — the player
+        and video clock start via _on_audio_baked when it lands.
         Speed/pitch are baked into whatever audio plays."""
         if not self._load_video_cv(path):
             return False
         if self._sidecar:
             self._create_audio_player(self._sidecar)  # sidecar wins; no temp file
             return True
-        audio_path = embedded_audio
-        if audio_path:
+        if embedded_audio:
             # Cached one-time extraction — plays from the cache dir and is
             # NEVER deleted on close (unlike _temp_audio).
-            self._create_audio_player(audio_path)  # may bake speed/pitch into a temp copy
+            self._create_audio_player(embedded_audio)  # may bake speed/pitch (async)
             return True
-        audio_path = ffmpeg_util.extract_audio(path)
-        if audio_path is None:
-            return True  # video only (ffmpeg missing / extraction failed)
-        self._temp_audio = audio_path
-        self._create_audio_player(audio_path)  # may bake speed/pitch into a second temp
+        # No audio yet: extract on a worker; _on_audio_baked attaches it.
+        self._audio_extracting = True
+        threading.Thread(target=self._extract_and_bake_async, args=(path,),
+                         daemon=True, name="dyst-audio-extract").start()
         return True
 
     def _load_video_qt(self, path: str) -> bool:
@@ -789,7 +916,8 @@ class OverlayWindow(QWidget):
         is played on a second player (sidecar wins per spec).
         speed: setPlaybackRate (tape style; when pitch == 1 the embedded
         audio speeds up naturally). pitch: the embedded track is extracted
-        and baked (dual-player pattern) so pitch is independent of speed."""
+        ASYNCHRONOUSLY (worker thread, no spawn-time freeze) and baked
+        (dual-player pattern) so pitch is independent of speed."""
         needs_embedded_pitch = (self._pitch != 1.0 and not self._sidecar)
         audio_out = QAudioOutput(self)
         audio_out.setVolume(0.0 if (self._sidecar or needs_embedded_pitch) else self._volume)
@@ -807,25 +935,137 @@ class OverlayWindow(QWidget):
         if self._sidecar:
             self._create_audio_player(self._sidecar)
         elif needs_embedded_pitch:
-            audio_path = ffmpeg_util.extract_audio(path)
-            if audio_path is not None:
-                self._temp_audio = audio_path
-                self._create_audio_player(audio_path)  # bakes speed+pitch
+            # Extract+bake on a WORKER thread (~1s of ffmpeg); the player
+            # then receives the finished file via _on_audio_baked.
+            self._audio_extracting = True
+            threading.Thread(target=self._extract_and_bake_async,
+                             args=(path,), daemon=True,
+                             name="dyst-audio-extract").start()
         return True
 
+    def _extract_and_bake_async(self, path: str) -> None:
+        """Worker: extract the embedded track, then bake speed/pitch.
+        Nothing to do when pitch == 1 (the raw extraction plays directly)."""
+        audio_path = ffmpeg_util.extract_audio(path)
+        if audio_path is None:
+            self._emit_audio_baked("", "")
+            return
+        if self._pitch == 1.0 and self._speed == 1.0:
+            self._emit_audio_baked(audio_path, audio_path)
+            return
+        baked = ffmpeg_util.pitch_shift(audio_path, self._pitch, self._speed)
+        if baked is None:
+            self._emit_audio_baked(audio_path, audio_path)
+            return
+        # Keep tracking the raw extraction too (the emit below tracks only
+        # the baked copy) so cleanup removes both.
+        self._temp_files.append(audio_path)
+        self._emit_audio_baked(baked, baked)
+
+    @Slot(str, str)
+    def _on_audio_baked(self, playable: str, temp: str) -> None:
+        """GUI thread: async audio prep finished — attach + start it (and the
+        video clock if it was waiting on audio)."""
+        self._audio_extracting = False
+        if self._closing:
+            # Tear-down raced the worker: drop every temp it may have made.
+            for p in ({temp} if temp else set()) | set(self._temp_files):
+                if p:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            self._temp_files.clear()
+            return
+        if not playable:
+            # extraction failed: silent video (same as before)
+            self._qt_deferred_start()
+            return
+        if temp:
+            self._temp_audio = temp
+        # NOTE: attach DIRECTLY — the file is already playable (baked, or the
+        # original on fallback). Going through _create_audio_player here
+        # would re-trigger the async bake loop forever.
+        if self._audio_player is None:
+            self._create_audio_player_now(playable)
+        if self._audio_player is not None:
+            self._audio_player.play()
+        if (self._end_on_audio_end and self._kind == "image"
+                and not self._visual_done
+                and self._image_end_timer is not None
+                and self._image_end_timer.isActive()):
+            # Image clock started before the (slow-baked) audio player
+            # existed — switch to the audio-end lifetime now.
+            self._image_end_timer.stop()
+            self._arm_audio_end_watchdog()
+        if self._video_clock_pending:
+            # Start now (stops the 2s fallback); _on_audio_baked may fire
+            # before OR after the fallback already started the clock.
+            self._start_video_clock()
+        if self._qt_deferred:
+            # video-qt + baked audio: start both together (synced).
+            self._qt_deferred = False
+            if self._player is not None:
+                self._player.play()
+
     def _on_qt_frame(self, frame) -> None:
-        img = frame.toImage()
-        if not img.isNull():
+        """QVideoSink callback (GUI thread): queue the QVideoFrame only
+        (~0.01 ms). toImage + height cap + crop/scale all happen on the
+        render worker (_render_frame_worker) — the old GUI-side frame
+        conversion was the main steady-state cost with several overlapping
+        videos (NV12->RGBA alone is ~3 ms/frame)."""
+        # Latest-wins: drop a stale unprocessed frame instead of queueing up.
+        while True:
+            try:
+                self._render_in.put_nowait(frame)
+                break
+            except queue.Full:
+                try:
+                    self._render_in.get_nowait()
+                except queue.Empty:
+                    pass
+
+    def _render_frame_worker(self) -> None:
+        """Worker thread (qt path): crop/scale each raw QVideoSink frame to
+        the window size, then publish it for presentation."""
+        while not self._decoder_stop.is_set():
+            try:
+                frame = self._render_in.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if frame is None:
+                return
+            try:
+                img = frame.toImage()   # NV12->RGBA: off-GUI on purpose
+            except RuntimeError:
+                continue                # frame/sink already deleted
+            if img.isNull():
+                continue
             if self._max_pb_h and img.height() > self._max_pb_h:
                 # QtMultimedia decodes internally (no OpenCV in this path),
-                # so the height cap is applied at paint time instead.
+                # so the height cap is applied here, before the layout scale.
                 dh = self._max_pb_h
                 dw = max(1, int(round(img.width() * dh / img.height())))
                 img = img.scaled(QSize(dw, dh), Qt.IgnoreAspectRatio,
                                  Qt.SmoothTransformation)
+            self._last_raw = img   # resize fallback uses the capped dims
+            built = self._build_display(img, self._layout)
+            if built is None:
+                # No/first layout or geometry change: rebuild on the GUI.
+                self._current = img
+                try:
+                    QMetaObject.invokeMethod(self, "_repaint_prepare",
+                                             Qt.QueuedConnection)
+                except RuntimeError:
+                    return  # overlay destroyed while rendering
+                continue
             self._current = img
-            self._prepare_current()
-            self.update()
+            self._render_cache = built
+            self._produced += 1
+            try:
+                QMetaObject.invokeMethod(self, "_repaint", Qt.QueuedConnection)
+            except RuntimeError:
+                return  # overlay destroyed while rendering
 
     def _on_qt_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -1011,6 +1251,87 @@ class OverlayWindow(QWidget):
             self._audio_done = True
             self._finish_close()
 
+    def _gif_load_worker(self, path: str, n_frames: int) -> None:
+        """Worker thread: decode every GIF frame (PIL), apply the playback
+        height cap + chroma key, convert to QImage and PRE-RENDER each frame's
+        display cache via _build_display — so the GUI's per-frame job during
+        playback is a plain QImage pointer swap."""
+        raws: list = []
+        disps: list = []
+        durations: list = []
+        try:
+            with Image.open(path) as im:
+                for i in range(n_frames):
+                    im.seek(i)
+                    frame = im.convert("RGBA")
+                    if self._max_pb_h and frame.height > self._max_pb_h:
+                        # Height cap: downscale BEFORE keying so
+                        # the mask/work cost scales with the cap.
+                        h2 = self._max_pb_h
+                        w2 = max(1, int(round(frame.width * h2 / frame.height)))
+                        frame = frame.resize((w2, h2), Image.BILINEAR)
+                    if self._chroma_params is not None:
+                        frame = chroma_mod.chroma_key_image(frame, self._chroma_params)
+                    arr = np.array(frame)
+                    h, w = arr.shape[:2]
+                    # .copy() so the QImage owns its buffer (numpy memory is reused)
+                    qi = QImage(arr.data, w, h, arr.strides[0],
+                                QImage.Format_RGBA8888).copy()
+                    raws.append(qi)
+                    disps.append(self._build_display(qi, self._layout))
+                    dur = im.info.get("duration", 100)
+                    durations.append(dur if dur > 0 else 100)
+        except Exception as exc:
+            log.warning("overlay: gif decode failed %s (%s)", path, exc)
+            raws, disps, durations = [], [], []
+        try:
+            self._gif_loaded.emit(raws, disps, durations)
+        except RuntimeError:
+            pass  # overlay already destroyed while decoding
+
+    def _on_gif_loaded(self, raws, disps, durations) -> None:
+        """GUI thread: install the worker-decoded GIF frames, start the frame
+        timer, and (if start() already ran) the deferred image clock."""
+        self._gif_loading = False
+        if self._closing:
+            return
+        if not raws:
+            log.warning("overlay: no gif frames for %s", self._path)
+            self._on_visual_finished()
+            return
+        self._gif_frames = raws
+        self._gif_disps = disps
+        self._gif_durations = durations
+        self._gif_duration_ms = sum(durations)
+        self._gif_frame_index = 0
+        self._current = raws[0]
+        if disps[0] is not None:
+            self._render_cache = disps[0]
+        else:
+            self._prepare_current()
+        self.update()
+        # Initialize single-shot timer; delay for Frame 0 -> Frame 1.
+        self._gif_timer = QTimer(self)
+        self._gif_timer.setSingleShot(True)
+        self._gif_timer.timeout.connect(self._advance_gif_frame)
+        self._gif_timer.start(max(1, int(self._gif_durations[0] / self._speed)))
+        if self._gif_start_pending:
+            self._gif_start_pending = False
+            self._begin_image_clock()
+
+    def _show_gif_frame(self, idx: int) -> None:
+        """Present GIF frame idx: pre-rendered display cache when available
+        (O(1)), else rebuild on the fly (layout was invalidated by resize)."""
+        self._current = self._gif_frames[idx]
+        disp = (self._gif_disps[idx]
+                if idx < len(self._gif_disps) and self._gif_disps[idx] is not None
+                else None)
+        if disp is not None:
+            self._render_cache = disp
+        else:
+            self._prepare_current()
+        self.update()
+
     def _advance_gif_frame(self) -> None:
         if not self._gif_frames or not hasattr(self, "_gif_durations"):
             return
@@ -1018,17 +1339,13 @@ class OverlayWindow(QWidget):
 
         if self._gif_frame_index >= len(self._gif_frames):
             self._gif_frame_index = len(self._gif_frames) - 1
-            self._current = self._gif_frames[self._gif_frame_index]
-            self._prepare_current()
-            self.update()
+            self._show_gif_frame(self._gif_frame_index)
             if self._gif_timer is not None:
                 self._gif_timer.stop()
                 self._gif_timer.deleteLater()
                 self._gif_timer = None
             return
-        self._current = self._gif_frames[self._gif_frame_index]
-        self._prepare_current()
-        self.update()
+        self._show_gif_frame(self._gif_frame_index)
         if self._gif_timer is not None:
             next_delay = self._gif_durations[self._gif_frame_index] / self._speed
             self._gif_timer.start(max(1, int(next_delay)))
@@ -1104,7 +1421,18 @@ class OverlayWindow(QWidget):
         return True, frame
 
     def _ensure_decoder(self) -> None:
-        """Start the background decode worker (once per overlay)."""
+        """Start the background workers (once per overlay): the render
+        worker for video-qt (crop/scale off-GUI), the cv2 decode worker
+        for every other video kind."""
+        if self._kind == "video-qt":
+            if self._render_thread is not None and self._render_thread.is_alive():
+                return
+            self._decoder_stop.clear()
+            t = threading.Thread(target=self._render_frame_worker,
+                                 name="dyst-render", daemon=True)
+            self._render_thread = t
+            t.start()
+            return
         if self._decoder_thread is not None and self._decoder_thread.is_alive():
             return
         self._decoder_stop.clear()
@@ -1126,8 +1454,11 @@ class OverlayWindow(QWidget):
 
     def _decoder_worker(self) -> None:
         """Background thread: blocking cv2 read + chroma key + QImage
-        convert. Pushes finished frames to _frame_queue; the GUI timer only
-        blits. Never touches widgets directly."""
+        convert + display build (crop/scale via _build_display — read-only,
+        safe off-GUI). Pushes (needs_present, display_or_raw) frames to
+        _frame_queue; the GUI timer only points _current at them + update(),
+        so the crop/scale hot path never runs on the GUI thread anymore.
+        Never touches widgets directly."""
         try:
             step = max(1, int(self._fps_step))
             while not self._decoder_stop.is_set():
@@ -1149,12 +1480,25 @@ class OverlayWindow(QWidget):
                 except Exception:
                     continue
                 self._decoder_presented += 1
+                raw = self._last_raw   # published by _on_qt_frame (qt path only)
+                disp = self._build_display(img, self._layout)
+                if disp is None:
+                    # Layout stale/missing (e.g. geometry change mid-resize):
+                    # hand the RAW frame to the GUI, which rebuilds the
+                    # layout via _prepare_current.
+                    self._last_raw = img
+                    disp, need = img, True
+                else:
+                    # need = first frame ever (paint must happen) or a
+                    # geometry change since the last present.
+                    need = raw is None or img.cacheKey() != raw.cacheKey()
                 # Bounded queue with backpressure: block when GUI lags so
                 # decode stays ~presentation rate (no drops, no speed-up).
                 # Stop event unblocks via _stop_decoder draining the queue.
+                self._produced += 1
                 while not self._decoder_stop.is_set():
                     try:
-                        self._frame_queue.put(img, timeout=0.2)
+                        self._frame_queue.put((need, disp), timeout=0.2)
                         break
                     except queue.Full:
                         continue
@@ -1169,10 +1513,34 @@ class OverlayWindow(QWidget):
         self._video_timer.stop()
         self._on_visual_finished()
 
+    @staticmethod
+    def _frame_of(item) -> tuple[bool, QImage]:
+        """Queue payload -> (needs_present, image). Plain QImage payloads
+        (no display cache yet) count as needing a present."""
+        if isinstance(item, tuple):
+            return item[0], item[1]
+        return True, item
+
+    @Slot()
+    def _repaint(self) -> None:
+        """Queued from _render_frame_worker: swap _render_cache in, repaint."""
+        if not self._closing:
+            self.update()
+
+    @Slot()
+    def _repaint_prepare(self) -> None:
+        """Queued when the worker had no fresh layout (first frame / geometry
+        change): rebuild the layout + display cache on the GUI thread."""
+        if self._closing:
+            return
+        self._prepare_current()
+        self.update()
+
     def _next_frame(self) -> None:
-        """GUI tick: present frames paced to the audio clock (or the timer
-        rate when no audio). Decode/key runs on the worker; this only blits,
-        so a slow frame can't block the event loop or stall audio."""
+        """GUI tick: point the overlay at worker-built frames paced to the
+        audio clock (or the timer rate when no audio). Decode/key/crop/scale
+        all run off-GUI; this is only a pointer swap + update(), so a slow
+        frame can't block the event loop or stall audio."""
         if self._closing:
             return
         if self._cap is None and self._frame_queue.empty():
@@ -1182,35 +1550,56 @@ class OverlayWindow(QWidget):
                 and self._audio_player is not None
                 and self._audio_player.playbackState()
                     == QMediaPlayer.PlaybackState.PlayingState):
+            step = max(1, int(self._fps_step))
+            eff_fps = self._fps / step
+            # Late-join audio (async ffmpeg extract/bake): the video clock
+            # may have run ahead while the audio was still preparing —
+            # seek the audio to the already-presented position instead of
+            # letting the clip play through unsynced.
+            if not self._qt_audio_late:
+                target_a = int(self._audio_player.position() * eff_fps / 1000.0)
+                if self._presented - target_a > 4:
+                    self._qt_audio_late = True  # one-shot: position() jumps
+                    self._audio_player.setPosition(
+                        int(self._presented / eff_fps * 1000.0))
             # Audio-synced pacing: present only up to where the audio clock
             # says we should be (never more than budget/tick, so catch-up
             # is smooth, not a jump). Worker stays ahead via the queue.
-            step = max(1, int(self._fps_step))
-            target = int(self._audio_player.position() * (self._fps / step) / 1000.0)
+            target = int(self._audio_player.position() * eff_fps / 1000.0)
             target = min(target, self._presented + budget)
             painted = False
+            last = None
+            need_present = False
             while self._presented < target:
                 try:
-                    img = self._frame_queue.get_nowait()
+                    item = self._frame_queue.get_nowait()
                 except queue.Empty:
                     break  # worker behind: wait, don't freeze on a burst
+                need, img = self._frame_of(item)
                 self._current = img
                 self._presented += 1
+                last = img
+                need_present = need_present or need
                 painted = True
             if painted:
-                self._prepare_current()
-                self.update()
+                if need_present and last is not None:
+                    self._present(last)  # geometry change: rebuild cache (rare)
+                else:
+                    self.update()        # display cache already built off-GUI
             return
         # No audio clock: timer already ticks at effective fps x speed, so
         # exactly one queued frame per tick keeps duration exact.
         try:
-            img = self._frame_queue.get_nowait()
+            item = self._frame_queue.get_nowait()
         except queue.Empty:
             return  # worker behind: skip tick, timer retries
+        need, img = self._frame_of(item)
         self._current = img
         self._presented += 1
-        self._prepare_current()
-        self.update()
+        if need:
+            self._present(img)  # first frame / geometry change: rebuild cache
+        else:
+            self.update()
 
     def _start_fade(self) -> None:
         self._video_timer.stop()
@@ -1291,6 +1680,7 @@ class OverlayWindow(QWidget):
             self._audio_start_watchdog = None
         self._video_clock_pending = False
         self._render_cache = None
+        self._layout = None   # workers stopped; drop the layout snapshot
         self._gif_frames = []
         self._gif_frame_index = 0
         for tmp in self._temp_files:

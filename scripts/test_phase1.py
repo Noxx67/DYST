@@ -279,22 +279,38 @@ def main() -> int:
     assert wall >= 1.5, f"0.5x video should take ~2s, finished in {wall:.2f}s"
     print("PASS speed: video at 2x finishes ~0.5s, at 0.5x ~2s")
 
-    # 3f. speed/pitch audio baking: with both == 1 the original file is
-    # returned untouched; with pitch != 1 a temp file is produced when
-    # ffmpeg is available (and the bake keeps the same duration).
+    # 3f. speed/pitch audio baking: with both == 1 the player is built
+    # synchronously with the original file; with pitch != 1 the bake runs
+    # on a WORKER thread (async) and _audio_baked attaches the player.
     from dyst import ffmpeg_util
     w = OverlayWindow()
     assert w.load(img_item.path, "image", image_seconds=1.0, fade_out_seconds=0.0)
     src = os.path.join(ROOT, "media", "images", "bear5.mp3")
-    assert w._prepare_audio_file(src) == src, "speed/pitch 1/1 must return the original"
+    w._create_audio_player(src)
+    assert w._audio_player is not None and not w._audio_extracting, \
+        "speed/pitch 1/1 must not bake"
     if ffmpeg_util.find_ffmpeg() is not None:
+        from PySide6.QtCore import QEventLoop, QTimer
         w2 = OverlayWindow()
         assert w2.load(img_item.path, "image", image_seconds=1.0, fade_out_seconds=0.0,
                        speed=1.5, pitch=2.0)
-        baked = w2._prepare_audio_file(src)
+        got = {}
+        loop = QEventLoop()
+
+        def _done(playable, temp):
+            got["playable"] = playable
+            got["temp"] = temp
+            loop.quit()
+
+        w2._audio_baked.connect(_done)
+        w2._create_audio_player(src)
+        assert w2._audio_extracting, "bake should be running on a worker"
+        QTimer.singleShot(30000, loop.quit)
+        loop.exec_()
+        baked = got.get("playable", "")
         assert baked != src and os.path.isfile(baked), f"bake failed: {baked}"
-        assert baked in w2._temp_files, "baked temp not tracked for cleanup"
-        print("PASS pitch+speed bake: temp file produced, tracked for cleanup")
+        assert w2._audio_player is not None, "player not attached after bake"
+        print("PASS pitch+speed bake: async bake produced player")
     else:
         print("SKIP pitch bake check: ffmpeg not available")
 
