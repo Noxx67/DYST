@@ -14,6 +14,8 @@ Turn your Windows desktop into a live shitpost over any app.
 
 ---
 
+![showcase](showcase.gif)
+
 ## Quick start
 
 **1. need python3 then run the following commands:**
